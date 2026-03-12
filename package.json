@@ -1,0 +1,50 @@
+{
+  "name": "whisper-alone",
+  "version": "1.0.0",
+  "description": "Voice-to-text macOS app — double-tap Command to transcribe with Whisper",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.renderer.json",
+    "prepare:dev-permissions": "bash ./scripts/prepare-dev-permissions.sh",
+    "reset:automation": "tccutil reset AppleEvents com.github.Electron",
+    "start": "npm run prepare:dev-permissions && npm run build && electron ./dist/main/main.js",
+    "postinstall": "electron-rebuild",
+    "dist": "npm run build && electron-builder --mac"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "electron-conf": "^1.2.1",
+    "openai": "^4.77.0",
+    "uiohook-napi": "^1.5.4"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.1",
+    "electron": "~33.3.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2"
+  },
+  "build": {
+    "appId": "com.whisperalone.app",
+    "productName": "WhisperAlone",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dmg",
+      "entitlements": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "WhisperAlone needs microphone access to record audio for transcription.",
+        "NSAppleEventsUsageDescription": "WhisperAlone needs automation access to paste transcribed text."
+      }
+    },
+    "icon": "build/icon.icns",
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "scripts/paste",
+      "scripts/prepare-dev-permissions.sh",
+      "src/renderer/**/*.html",
+      "src/renderer/**/*.css"
+    ]
+  }
+}

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      background: transparent;
+      overflow: hidden;
+      -webkit-app-region: no-drag;
+      user-select: none;
+    }
+
+    .overlay {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    .pill {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(20, 20, 20, 0.88);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 24px;
+      padding: 10px 20px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    .mic-icon {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #ff3b30;
+      animation: pulse 1.5s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.6; transform: scale(0.85); }
+    }
+
+    .waveform {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 28px;
+    }
+
+    .bar {
+      width: 3px;
+      border-radius: 2px;
+      background: #ffffff;
+      transition: height 0.08s ease;
+      min-height: 4px;
+    }
+
+    .label {
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      color: rgba(255, 255, 255, 0.7);
+      margin-left: 4px;
+      white-space: nowrap;
+    }
+
+    /* Processing state */
+    .pill.processing .mic-icon {
+      background: #ff9500;
+      animation: none;
+    }
+
+    .pill.processing .label {
+      color: rgba(255, 255, 255, 0.5);
+    }
+  </style>
+</head>
+<body>
+  <div class="overlay">
+    <div class="pill" id="pill">
+      <div class="mic-icon"></div>
+      <div class="waveform" id="waveform"></div>
+      <div class="label" id="label">Listening...</div>
+    </div>
+  </div>
+
+  <script src="../../dist/renderer/overlay.js"></script>
+</body>
+</html>
