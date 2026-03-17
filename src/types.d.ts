@@ -1,3 +1,15 @@
+interface MLXModel {
+  id: string;
+  name: string;
+  size: string;
+  speed: string;
+}
+
+interface AppSettings {
+  backend: 'openai' | 'mlx';
+  mlxModel: string;
+}
+
 interface WhisperAloneAPI {
   // Audio capture
   onStartRecording: (callback: () => void) => void;
@@ -19,6 +31,11 @@ interface WhisperAloneAPI {
       }>
     ) => void
   ) => void;
+
+  // Settings
+  getSettings: () => Promise<AppSettings>;
+  setSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>;
+  getMLXModels: () => Promise<MLXModel[]>;
 }
 
 interface Window {

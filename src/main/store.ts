@@ -1,4 +1,5 @@
 import { Conf } from 'electron-conf';
+import type { TranscriberBackend } from './transcriber';
 
 export interface TranscriptionEntry {
   id: string;
@@ -7,15 +8,29 @@ export interface TranscriptionEntry {
   duration: number;
 }
 
+export interface AppSettings {
+  backend: TranscriberBackend;
+  mlxModel: string;
+}
+
 interface StoreSchema {
   history: TranscriptionEntry[];
+  settings: AppSettings;
 }
+
+const DEFAULT_SETTINGS: AppSettings = {
+  backend: 'openai',
+  mlxModel: 'mlx-community/whisper-small',
+};
 
 const store = new Conf<StoreSchema>({
   defaults: {
     history: [],
+    settings: DEFAULT_SETTINGS,
   },
 });
+
+// --- History ---
 
 export function addHistoryEntry(text: string, audioSizeBytes: number): TranscriptionEntry {
   const entry: TranscriptionEntry = {
@@ -44,4 +59,17 @@ export function getHistory(): TranscriptionEntry[] {
 
 export function clearHistory(): void {
   store.set('history', []);
+}
+
+// --- Settings ---
+
+export function getSettings(): AppSettings {
+  return store.get('settings') || DEFAULT_SETTINGS;
+}
+
+export function setSettings(settings: Partial<AppSettings>): AppSettings {
+  const current = getSettings();
+  const updated = { ...current, ...settings };
+  store.set('settings', updated);
+  return updated;
 }

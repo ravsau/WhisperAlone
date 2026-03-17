@@ -1,0 +1,4 @@
+# Python dependencies for MLX local transcription.
+# These are auto-installed by the app into a managed venv.
+# Manual install: pip3 install -r requirements.txt
+mlx-whisper>=0.4.0

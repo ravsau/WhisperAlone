@@ -20,4 +20,9 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('history-update', (_event, entries) => callback(entries));
   },
   getHistory: () => ipcRenderer.invoke('get-history'),
+
+  // Settings APIs
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  setSettings: (settings: any) => ipcRenderer.invoke('set-settings', settings),
+  getMLXModels: () => ipcRenderer.invoke('get-mlx-models'),
 });
