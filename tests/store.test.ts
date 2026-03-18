@@ -32,7 +32,7 @@ import { addHistoryEntry, getHistory, clearHistory, getSettings, setSettings } f
 beforeEach(() => {
   mockStore.clear();
   mockStore.set('history', []);
-  mockStore.set('settings', { backend: 'mlx', mlxModel: 'mlx-community/whisper-small' });
+  mockStore.set('settings', { backend: 'mlx', mlxModel: 'mlx-community/whisper-large-v3-turbo' });
 });
 
 describe('History', () => {
@@ -82,14 +82,14 @@ describe('Settings', () => {
   it('returns default settings', () => {
     const settings = getSettings();
     expect(settings.backend).toBe('mlx');
-    expect(settings.mlxModel).toBe('mlx-community/whisper-small');
+    expect(settings.mlxModel).toBe('mlx-community/whisper-large-v3-turbo');
   });
 
   it('updates backend setting', () => {
     setSettings({ backend: 'mlx' });
     const settings = getSettings();
     expect(settings.backend).toBe('mlx');
-    expect(settings.mlxModel).toBe('mlx-community/whisper-small');
+    expect(settings.mlxModel).toBe('mlx-community/whisper-large-v3-turbo');
   });
 
   it('updates model setting', () => {

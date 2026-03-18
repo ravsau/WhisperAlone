@@ -103,64 +103,46 @@ async function startMLXWithProgress(): Promise<void> {
 function buildTrayMenu(): Menu {
   const settings = getSettings();
   const mlxRunning = isMLXServerRunning();
+  const hasApiKey = !!process.env.OPENAI_API_KEY;
+
+  // Show transient status only when server is loading
+  const statusItems = (settings.backend === 'mlx' && !mlxRunning)
+    ? [{ label: 'Starting...', enabled: false as const }, { type: 'separator' as const }]
+    : [];
 
   return Menu.buildFromTemplate([
-    {
-      label: `Engine: ${settings.backend === 'openai' ? 'OpenAI API' : 'MLX Local'}`,
-      enabled: false,
-    },
-    ...(settings.backend === 'mlx'
+    ...statusItems,
+    // Local model choices: Fast vs Quality
+    ...MLX_MODELS.map((model) => ({
+      label: `${model.label}  (${model.description})`,
+      type: 'radio' as const,
+      checked: settings.backend === 'mlx' && settings.mlxModel === model.id,
+      click: async () => {
+        setSettings({ mlxModel: model.id, backend: 'mlx' });
+        rebuildTrayMenu();
+        log(`[Settings] Selected: ${model.label} (${model.id})`);
+        if (!isMLXServerRunning()) {
+          await startMLXWithProgress();
+        }
+      },
+    })),
+    // Only show OpenAI if user has an API key configured
+    ...(hasApiKey
       ? [
+          { type: 'separator' as const },
           {
-            label: `Model: ${MLX_MODELS.find(m => m.id === settings.mlxModel)?.name || settings.mlxModel}`,
-            enabled: false as const,
-          },
-          {
-            label: mlxRunning ? 'MLX Server: Running' : 'MLX Server: Stopped',
-            enabled: false as const,
+            label: 'OpenAI Cloud',
+            type: 'radio' as const,
+            checked: settings.backend === 'openai',
+            click: async () => {
+              setSettings({ backend: 'openai' });
+              await stopMLXServer();
+              rebuildTrayMenu();
+              log('[Settings] Switched to OpenAI backend');
+            },
           },
         ]
       : []),
-    { type: 'separator' as const },
-    {
-      label: 'OpenAI Whisper API',
-      type: 'radio' as const,
-      checked: settings.backend === 'openai',
-      click: async () => {
-        setSettings({ backend: 'openai' });
-        await stopMLXServer();
-        rebuildTrayMenu();
-        log('[Settings] Switched to OpenAI backend, MLX server stopped');
-      },
-    },
-    {
-      label: 'MLX Local Models',
-      type: 'radio' as const,
-      checked: settings.backend === 'mlx',
-      click: async () => {
-        setSettings({ backend: 'mlx' });
-        rebuildTrayMenu();
-        log('[Settings] Switched to MLX backend, starting server...');
-        await startMLXWithProgress();
-      },
-    },
-    { type: 'separator' as const },
-    {
-      label: 'Select MLX Model',
-      submenu: MLX_MODELS.map((model) => ({
-        label: `${model.name}  (${model.size}, ${model.speed})`,
-        type: 'radio' as const,
-        checked: settings.mlxModel === model.id,
-        click: async () => {
-          setSettings({ mlxModel: model.id, backend: 'mlx' });
-          rebuildTrayMenu();
-          log(`[Settings] Selected MLX model: ${model.id}`);
-          if (!isMLXServerRunning()) {
-            await startMLXWithProgress();
-          }
-        },
-      })),
-    },
     { type: 'separator' as const },
     { label: 'Show History', click: () => showMainWindow() },
     { type: 'separator' as const },

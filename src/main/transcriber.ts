@@ -28,16 +28,14 @@ async function transcribeWithOpenAI(audioBuffer: Buffer): Promise<string> {
     : (transcription as any).text?.trim() ?? '';
 }
 
-// --- Public API ---
+// --- Models ---
 
 export const MLX_MODELS = [
-  { id: 'mlx-community/whisper-tiny', name: 'Whisper Tiny', size: '~75 MB', speed: 'Fastest' },
-  { id: 'mlx-community/whisper-base', name: 'Whisper Base', size: '~140 MB', speed: 'Fast' },
-  { id: 'mlx-community/whisper-small', name: 'Whisper Small', size: '~460 MB', speed: 'Balanced' },
-  { id: 'mlx-community/whisper-medium', name: 'Whisper Medium', size: '~1.5 GB', speed: 'Accurate' },
-  { id: 'mlx-community/whisper-large-v3-turbo', name: 'Whisper Large v3 Turbo', size: '~1.6 GB', speed: 'Best (Turbo)' },
-  { id: 'mlx-community/whisper-large-v3', name: 'Whisper Large v3', size: '~3 GB', speed: 'Best' },
+  { id: 'mlx-community/whisper-large-v3-turbo', label: 'Fast', description: 'local, ~0.7s', size: '~1.6 GB' },
+  { id: 'mlx-community/whisper-large-v3', label: 'Quality', description: 'local, most accurate', size: '~3 GB' },
 ];
+
+export const DEFAULT_MLX_MODEL = MLX_MODELS[0].id;
 
 export type TranscriberBackend = 'openai' | 'mlx';
 

@@ -81,20 +81,16 @@ Runs Whisper models locally on your Mac using Apple's [MLX framework](https://gi
 
 No manual `pip install` required.
 
-**Available models** (selectable from the tray menu):
+**Two modes** (selectable from the tray menu):
 
-| Model | Size | Speed | Quality |
-|-------|------|-------|---------|
-| Whisper Tiny | ~75 MB | Fastest | Basic |
-| Whisper Base | ~140 MB | Fast | Good |
-| Whisper Small | ~460 MB | Balanced | Great |
-| Whisper Medium | ~1.5 GB | Slower | Very good |
-| Whisper Large v3 Turbo | ~1.6 GB | Moderate | Best (optimized) |
-| Whisper Large v3 | ~3 GB | Slowest | Best |
+| Mode | Model | Size | Latency | Accuracy |
+|------|-------|------|---------|----------|
+| **Fast** | Whisper Large v3 Turbo | ~1.6 GB | ~0.7s | Excellent |
+| **Quality** | Whisper Large v3 | ~3 GB | ~1.5s | Best |
 
-### Switching Engines
+### Switching Modes
 
-Right-click the menu bar icon to switch between OpenAI and MLX, or pick a specific MLX model. The MLX server starts and stops automatically.
+Click the menu bar icon to toggle between Fast and Quality. If you have an OpenAI API key configured in `~/.env`, a third "OpenAI Cloud" option appears in the menu.
 
 ### Benchmarks
 
@@ -112,7 +108,7 @@ Local MLX models are 3-15x faster than the cloud API since there's no network ro
 
 - **Double-tap Command** to toggle recording (won't interfere with shortcuts)
 - **Menu bar tray app** with no dock icon or window clutter
-- **OpenAI or local MLX** transcription with model picker
+- **Fast or Quality** local transcription, OpenAI cloud as optional fallback
 - **Auto-managed MLX server** starts with the app, installs dependencies automatically
 - **Recording overlay** shows a small pill at the bottom of your screen
 - **Transcription history** accessible via tray icon > Show History

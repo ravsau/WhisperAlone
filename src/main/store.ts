@@ -20,7 +20,7 @@ interface StoreSchema {
 
 const DEFAULT_SETTINGS: AppSettings = {
   backend: 'mlx',
-  mlxModel: 'mlx-community/whisper-small',
+  mlxModel: 'mlx-community/whisper-large-v3-turbo',
 };
 
 const store = new Conf<StoreSchema>({
