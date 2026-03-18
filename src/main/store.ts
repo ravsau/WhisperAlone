@@ -19,7 +19,7 @@ interface StoreSchema {
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
-  backend: 'openai',
+  backend: 'mlx',
   mlxModel: 'mlx-community/whisper-small',
 };
 

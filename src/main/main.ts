@@ -17,7 +17,7 @@ import { transcribeAudio, MLX_MODELS } from './transcriber';
 import { injectText } from './injector';
 import { addHistoryEntry, getHistory, getSettings, setSettings } from './store';
 import { log, logError } from './logger';
-import { startMLXServer, stopMLXServer, isMLXServerRunning } from './mlx-server';
+import { startMLXServer, stopMLXServer, isMLXServerRunning, isFirstBoot } from './mlx-server';
 
 import os from 'os';
 
@@ -28,6 +28,7 @@ let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
 let audioWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
+let setupWindow: BrowserWindow | null = null;
 let hotkey: HotkeyManager | null = null;
 
 // Resolve asset path (works in both dev and packaged app)
@@ -41,6 +42,60 @@ function rendererPath(filename: string): string {
 
 function preloadPath(): string {
   return path.join(__dirname, '../preload/preload.js');
+}
+
+// --- Setup Window ---
+
+function createSetupWindow(): void {
+  const display = screen.getPrimaryDisplay();
+  const { width: screenWidth, height: screenHeight } = display.workAreaSize;
+  const winWidth = 380;
+  const winHeight = 300;
+
+  setupWindow = new BrowserWindow({
+    width: winWidth,
+    height: winHeight,
+    x: Math.round((screenWidth - winWidth) / 2),
+    y: Math.round((screenHeight - winHeight) / 2),
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    hasShadow: true,
+    vibrancy: 'under-window',
+    webPreferences: {
+      preload: preloadPath(),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  setupWindow.loadFile(rendererPath('setup.html'));
+  setupWindow.once('ready-to-show', () => {
+    setupWindow?.show();
+  });
+}
+
+function sendSetupProgress(step: string, state: string, message: string): void {
+  setupWindow?.webContents.send('setup-progress', { step, state, message });
+}
+
+function closeSetupWindow(delayMs = 2000): void {
+  setTimeout(() => {
+    setupWindow?.close();
+    setupWindow = null;
+  }, delayMs);
+}
+
+async function startMLXWithProgress(): Promise<void> {
+  createSetupWindow();
+  const ok = await startMLXServer((step, state, message) => {
+    sendSetupProgress(step, state, message);
+  });
+  rebuildTrayMenu();
+  closeSetupWindow(ok ? 2000 : 5000);
 }
 
 // --- Tray ---
@@ -86,8 +141,7 @@ function buildTrayMenu(): Menu {
         setSettings({ backend: 'mlx' });
         rebuildTrayMenu();
         log('[Settings] Switched to MLX backend, starting server...');
-        await startMLXServer();
-        rebuildTrayMenu();
+        await startMLXWithProgress();
       },
     },
     { type: 'separator' as const },
@@ -101,10 +155,8 @@ function buildTrayMenu(): Menu {
           setSettings({ mlxModel: model.id, backend: 'mlx' });
           rebuildTrayMenu();
           log(`[Settings] Selected MLX model: ${model.id}`);
-          // Restart server isn't needed — model is passed per-request
           if (!isMLXServerRunning()) {
-            await startMLXServer();
-            rebuildTrayMenu();
+            await startMLXWithProgress();
           }
         },
       })),
@@ -181,7 +233,6 @@ function createAudioWindow(): void {
 
   audioWindow.loadFile(rendererPath('audio-capture.html'));
 
-  // Pipe renderer console to main process
   audioWindow.webContents.on('console-message', (_e, _level, message) => {
     log(`[AudioRenderer] ${message}`);
   });
@@ -232,7 +283,6 @@ function showOverlay(): void {
 
 function hideOverlay(): void {
   overlayWindow?.webContents.send('stop-recording');
-  // Keep visible briefly to show "Transcribing..." state
   setTimeout(() => {
     overlayWindow?.hide();
   }, 500);
@@ -247,7 +297,6 @@ function hideOverlayNow(): void {
 function checkPermissions(): void {
   const settings = getSettings();
 
-  // Check API key only if using OpenAI backend
   if (settings.backend === 'openai' && !process.env.OPENAI_API_KEY) {
     dialog.showMessageBoxSync({
       type: 'warning',
@@ -258,7 +307,6 @@ function checkPermissions(): void {
     });
   }
 
-  // Check Accessibility permission
   const isTrusted = systemPreferences.isTrustedAccessibilityClient(false);
   if (!isTrusted) {
     dialog
@@ -278,7 +326,6 @@ function checkPermissions(): void {
       });
   }
 
-  // Check Microphone permission
   const micStatus = systemPreferences.getMediaAccessStatus('microphone');
   if (micStatus !== 'granted') {
     systemPreferences.askForMediaAccess('microphone');
@@ -313,7 +360,6 @@ function setupIPC(): void {
     try {
       const buffer = Buffer.from(new Uint8Array(data));
 
-      // Skip very short recordings (< ~0.5s of audio)
       if (buffer.length < 2000) {
         log(`[WhisperAlone] Recording too short (${buffer.length} bytes), skipping`);
         hotkey?.setIdle();
@@ -325,14 +371,9 @@ function setupIPC(): void {
 
       if (text && text.length > 0) {
         log(`[WhisperAlone] Transcribed: "${text}"`);
-
-        // Inject text at cursor
         await injectText(text);
-
-        // Save to history
         addHistoryEntry(text, buffer.length);
         mainWindow?.webContents.send('history-update', getHistory());
-
       } else {
         log('[WhisperAlone] Empty transcription, skipping');
       }
@@ -362,29 +403,22 @@ function setupIPC(): void {
     }).show();
   });
 
-  ipcMain.handle('get-history', () => {
-    return getHistory();
-  });
-
-  ipcMain.handle('get-settings', () => {
-    return getSettings();
-  });
-
-  ipcMain.handle('set-settings', (_event, settings: any) => {
-    const updated = setSettings(settings);
+  ipcMain.handle('get-history', () => getHistory());
+  ipcMain.handle('get-settings', () => getSettings());
+  ipcMain.handle('set-settings', (_event, input: Record<string, unknown>) => {
+    const safe: Record<string, unknown> = {};
+    if (input.backend === 'openai' || input.backend === 'mlx') safe.backend = input.backend;
+    if (typeof input.mlxModel === 'string') safe.mlxModel = input.mlxModel;
+    const updated = setSettings(safe);
     rebuildTrayMenu();
     return updated;
   });
-
-  ipcMain.handle('get-mlx-models', () => {
-    return MLX_MODELS;
-  });
+  ipcMain.handle('get-mlx-models', () => MLX_MODELS);
 }
 
 // --- App Lifecycle ---
 
 app.whenReady().then(async () => {
-  // Hide dock icon — tray-only app
   app.dock?.hide();
 
   createTray();
@@ -396,34 +430,34 @@ app.whenReady().then(async () => {
   setupHotkey();
 
   const settings = getSettings();
+  const firstBoot = isFirstBoot();
+
   log('[WhisperAlone] Ready. Double-tap ⌘ Command to start recording.');
-  log(`[WhisperAlone] Backend: ${settings.backend}, MLX Model: ${settings.mlxModel}`);
+  log(`[WhisperAlone] Backend: ${settings.backend}, MLX Model: ${settings.mlxModel}, First boot: ${firstBoot}`);
   log(`[WhisperAlone] OPENAI_API_KEY set: ${!!process.env.OPENAI_API_KEY}`);
 
-  // Auto-start MLX server if backend is MLX
-  if (settings.backend === 'mlx') {
-    log('[WhisperAlone] Auto-starting MLX server...');
-    const ok = await startMLXServer();
+  // First boot: default to MLX and auto-setup with progress window
+  if (firstBoot) {
+    log('[WhisperAlone] First boot — setting up MLX local transcription...');
+    setSettings({ backend: 'mlx' });
     rebuildTrayMenu();
-    if (ok) {
-      log('[WhisperAlone] MLX server started successfully');
-    } else {
-      logError('[WhisperAlone] MLX server failed to start');
-    }
+  }
+
+  if (settings.backend === 'mlx' || firstBoot) {
+    await startMLXWithProgress();
   }
 });
 
 app.on('window-all-closed', () => {
-  // Prevent app from quitting when windows close — tray app stays alive
-  // Do nothing — tray app stays alive
+  // tray app stays alive
 });
 
 app.on('before-quit', async () => {
   hotkey?.stop();
   await stopMLXServer();
-  // Allow windows to actually close on quit
   mainWindow?.removeAllListeners('close');
   mainWindow?.close();
   audioWindow?.close();
   overlayWindow?.close();
+  setupWindow?.close();
 });

@@ -96,6 +96,18 @@ No manual `pip install` required.
 
 Right-click the menu bar icon to switch between OpenAI and MLX, or pick a specific MLX model. The MLX server starts and stops automatically.
 
+### Benchmarks
+
+Tested on Apple M3 with a 5-second spoken sentence:
+
+| Engine | Model | Avg Latency | Accuracy |
+|--------|-------|-------------|----------|
+| MLX (local) | whisper-tiny | 0.15s | Fair (struggles with proper nouns) |
+| MLX (local) | whisper-large-v3-turbo | 0.70s | Excellent |
+| OpenAI (cloud) | whisper-1 | 2.25s | Excellent |
+
+Local MLX models are 3-15x faster than the cloud API since there's no network round-trip. The `whisper-large-v3-turbo` model hits the sweet spot of speed and accuracy for most use cases and is the recommended local model.
+
 ## Features
 
 - **Double-tap Command** to toggle recording (won't interfere with shortcuts)

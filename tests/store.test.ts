@@ -32,7 +32,7 @@ import { addHistoryEntry, getHistory, clearHistory, getSettings, setSettings } f
 beforeEach(() => {
   mockStore.clear();
   mockStore.set('history', []);
-  mockStore.set('settings', { backend: 'openai', mlxModel: 'mlx-community/whisper-small' });
+  mockStore.set('settings', { backend: 'mlx', mlxModel: 'mlx-community/whisper-small' });
 });
 
 describe('History', () => {
@@ -81,7 +81,7 @@ describe('History', () => {
 describe('Settings', () => {
   it('returns default settings', () => {
     const settings = getSettings();
-    expect(settings.backend).toBe('openai');
+    expect(settings.backend).toBe('mlx');
     expect(settings.mlxModel).toBe('mlx-community/whisper-small');
   });
 

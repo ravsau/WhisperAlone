@@ -10,7 +10,7 @@ vi.mock('openai', () => ({
 }));
 
 vi.mock('../src/main/store', () => ({
-  getSettings: vi.fn(() => ({ backend: 'openai', mlxModel: 'mlx-community/whisper-small' })),
+  getSettings: vi.fn(() => ({ backend: 'mlx', mlxModel: 'mlx-community/whisper-small' })),
 }));
 
 vi.mock('../src/main/mlx-server', () => ({

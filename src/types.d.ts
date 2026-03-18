@@ -36,6 +36,9 @@ interface WhisperAloneAPI {
   getSettings: () => Promise<AppSettings>;
   setSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>;
   getMLXModels: () => Promise<MLXModel[]>;
+
+  // Setup progress
+  onSetupProgress: (callback: (data: { step: string; state: string; message: string }) => void) => void;
 }
 
 interface Window {

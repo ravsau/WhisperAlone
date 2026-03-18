@@ -12,20 +12,16 @@ Endpoints:
 
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs
-import cgi
 
-# Current loaded model cache
-_current_model = None
 _current_model_name = None
 
 
 def get_transcriber(model_name):
-    """Import and cache mlx_whisper module."""
     global _current_model_name
     try:
         import mlx_whisper
@@ -35,9 +31,41 @@ def get_transcriber(model_name):
         raise ImportError("mlx-whisper not installed")
 
 
+def parse_multipart(body, boundary):
+    """Parse multipart form data without cgi module (removed in Python 3.13)."""
+    parts = {}
+    boundary_bytes = boundary.encode("utf-8") if isinstance(boundary, str) else boundary
+    # Split on boundary
+    chunks = body.split(b"--" + boundary_bytes)
+    for chunk in chunks:
+        if not chunk or chunk.strip() in (b"", b"--", b"--\r\n"):
+            continue
+        # Split headers from body at first double CRLF
+        sep = chunk.find(b"\r\n\r\n")
+        if sep == -1:
+            continue
+        header_block = chunk[:sep].decode("utf-8", errors="replace")
+        content = chunk[sep + 4:]
+        # Strip trailing \r\n
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+
+        # Get field name from Content-Disposition
+        name_match = re.search(r'name="([^"]+)"', header_block)
+        if not name_match:
+            continue
+        name = name_match.group(1)
+
+        filename_match = re.search(r'filename="([^"]+)"', header_block)
+        if filename_match:
+            parts[name] = {"filename": filename_match.group(1), "data": content}
+        else:
+            parts[name] = {"data": content.decode("utf-8", errors="replace").strip()}
+    return parts
+
+
 class TranscribeHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        # Log to stderr so Node can capture it
         print(f"[MLX-Server] {format % args}", file=sys.stderr, flush=True)
 
     def do_GET(self):
@@ -57,34 +85,34 @@ class TranscribeHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            # Parse multipart form data
             content_type = self.headers.get("Content-Type", "")
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
 
             if "multipart/form-data" in content_type:
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={
-                        "REQUEST_METHOD": "POST",
-                        "CONTENT_TYPE": content_type,
-                    },
-                )
-                model_name = form.getvalue("model", "mlx-community/whisper-small")
-                file_item = form["file"]
-                audio_data = file_item.file.read()
+                # Extract boundary from Content-Type
+                boundary_match = re.search(r"boundary=(.+?)(?:;|$)", content_type)
+                if not boundary_match:
+                    self._json_response(400, {"error": "missing boundary"})
+                    return
+                boundary = boundary_match.group(1).strip()
+
+                parts = parse_multipart(body, boundary)
+                model_name = parts.get("model", {}).get("data", "mlx-community/whisper-small") if "model" in parts else "mlx-community/whisper-small"
+                file_part = parts.get("file")
+                if not file_part:
+                    self._json_response(400, {"error": "no file field"})
+                    return
+                audio_data = file_part["data"]
             else:
-                # Raw audio body with model in query string or header
-                content_length = int(self.headers.get("Content-Length", 0))
-                audio_data = self.rfile.read(content_length)
+                audio_data = body
                 model_name = self.headers.get("X-Model", "mlx-community/whisper-small")
 
             if not audio_data:
                 self._json_response(400, {"error": "no audio data"})
                 return
 
-            # Write to temp file (mlx-whisper needs file path)
-            suffix = ".webm"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
                 tmp.write(audio_data)
                 tmp_path = tmp.name
 

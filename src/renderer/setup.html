@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>WhisperAlone Setup</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a1a;
+      color: #e5e5e5;
+      overflow: hidden;
+      -webkit-app-region: drag;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      padding: 32px;
+      text-align: center;
+    }
+    .icon {
+      font-size: 48px;
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      letter-spacing: -0.3px;
+    }
+    .status {
+      font-size: 13px;
+      color: #999;
+      margin-bottom: 24px;
+      min-height: 18px;
+      transition: color 0.3s;
+    }
+    .status.error { color: #ff453a; }
+    .status.success { color: #30d158; }
+    .progress-track {
+      width: 100%;
+      max-width: 280px;
+      height: 4px;
+      background: #333;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #0a84ff, #5ac8fa);
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.5s ease;
+    }
+    .progress-bar.indeterminate {
+      width: 30%;
+      animation: slide 1.5s ease-in-out infinite;
+    }
+    @keyframes slide {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(400%); }
+    }
+    .steps {
+      -webkit-app-region: no-drag;
+      width: 100%;
+      max-width: 280px;
+      text-align: left;
+    }
+    .step {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      font-size: 12px;
+      color: #666;
+      transition: color 0.3s;
+    }
+    .step.active { color: #e5e5e5; }
+    .step.done { color: #30d158; }
+    .step.error { color: #ff453a; }
+    .step-icon {
+      width: 16px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid #444;
+      border-top-color: #0a84ff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon" id="icon">🎤</div>
+    <h1 id="title">Setting up WhisperAlone</h1>
+    <p class="status" id="status">Preparing local transcription engine...</p>
+    <div class="progress-track">
+      <div class="progress-bar indeterminate" id="progress"></div>
+    </div>
+    <div class="steps">
+      <div class="step" id="step-venv">
+        <span class="step-icon" id="step-venv-icon">○</span>
+        <span>Create Python environment</span>
+      </div>
+      <div class="step" id="step-install">
+        <span class="step-icon" id="step-install-icon">○</span>
+        <span>Install MLX Whisper engine</span>
+      </div>
+      <div class="step" id="step-server">
+        <span class="step-icon" id="step-server-icon">○</span>
+        <span>Start local server</span>
+      </div>
+    </div>
+  </div>
+  <script src="../../dist/renderer/setup.js"></script>
+</body>
+</html>

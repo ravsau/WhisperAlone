@@ -25,4 +25,9 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   setSettings: (settings: any) => ipcRenderer.invoke('set-settings', settings),
   getMLXModels: () => ipcRenderer.invoke('get-mlx-models'),
+
+  // Setup progress
+  onSetupProgress: (callback: (data: any) => void) => {
+    ipcRenderer.on('setup-progress', (_event, data) => callback(data));
+  },
 });

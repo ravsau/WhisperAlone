@@ -1,41 +1,96 @@
-import { ChildProcess, spawn, execFile } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
-import os from 'os';
 import http from 'http';
-import { app, dialog, Notification } from 'electron';
+import { app, dialog } from 'electron';
 import { log, logError } from './logger';
 
 const MLX_SERVER_PORT = 18456;
 const VENV_DIR = path.join(app.getPath('userData'), 'mlx-venv');
 const VENV_PYTHON = path.join(VENV_DIR, 'bin', 'python3');
+const SETUP_DONE_FLAG = path.join(app.getPath('userData'), '.mlx-setup-done');
+
+// Packaged apps don't inherit shell PATH — add common Python locations
+const EXTRA_PATHS = [
+  '/opt/homebrew/bin',
+  '/usr/local/bin',
+  '/usr/bin',
+  path.join(VENV_DIR, 'bin'),
+];
+
+// Computed once at module load
+const ENHANCED_PATH = (() => {
+  const existing = process.env.PATH || '';
+  return [...new Set([...EXTRA_PATHS, ...existing.split(':')])].join(':');
+})();
+
+function getSpawnEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, PATH: ENHANCED_PATH };
+}
+
+function findPython3(): string {
+  // Check common locations explicitly
+  const candidates = [
+    '/opt/homebrew/bin/python3',
+    '/usr/local/bin/python3',
+    '/usr/bin/python3',
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  // Fallback to PATH lookup
+  return 'python3';
+}
 
 let serverProcess: ChildProcess | null = null;
 let serverReady = false;
 let setupInProgress = false;
 
+export type ProgressCallback = (step: string, state: string, message: string) => void;
+
 function getServerScriptPath(): string {
+  // In dev mode, use the script directly
   const devPath = path.join(__dirname, '../../scripts/mlx-server.py');
-  if (fs.existsSync(devPath)) return devPath;
-  return path.join(process.resourcesPath || __dirname, 'scripts/mlx-server.py');
+  if (fs.existsSync(devPath) && !devPath.includes('.asar')) return devPath;
+
+  // In packaged app, scripts are inside app.asar which Python can't read.
+  // Extract to userData so Python can access them.
+  const extractDir = path.join(app.getPath('userData'), 'scripts');
+  const extractedPath = path.join(extractDir, 'mlx-server.py');
+
+  try {
+    if (!fs.existsSync(extractDir)) {
+      fs.mkdirSync(extractDir, { recursive: true });
+    }
+
+    // Always overwrite to pick up updates
+    const asarPath = path.join(__dirname, '../../scripts/mlx-server.py');
+    const content = fs.readFileSync(asarPath, 'utf-8');
+    fs.writeFileSync(extractedPath, content, { mode: 0o755 });
+    log(`[MLX-Server] Extracted server script to ${extractedPath}`);
+  } catch (err) {
+    logError('[MLX-Server] Failed to extract server script:', err);
+  }
+
+  return extractedPath;
 }
 
-// --- Venv Setup (auto-install mlx-whisper) ---
+// --- First boot detection ---
+
+export function isFirstBoot(): boolean {
+  return !fs.existsSync(SETUP_DONE_FLAG);
+}
+
+function markSetupDone(): void {
+  try {
+    fs.writeFileSync(SETUP_DONE_FLAG, new Date().toISOString());
+  } catch {}
+}
+
+// --- Venv Setup ---
 
 function venvExists(): boolean {
   return fs.existsSync(VENV_PYTHON);
-}
-
-function mlxInstalled(): boolean {
-  if (!venvExists()) return false;
-  try {
-    const sitePackages = path.join(VENV_DIR, 'lib');
-    if (!fs.existsSync(sitePackages)) return false;
-    // Check if mlx_whisper is importable
-    return true; // We'll verify at server start
-  } catch {
-    return false;
-  }
 }
 
 async function runCommand(cmd: string, args: string[], label: string): Promise<void> {
@@ -43,7 +98,7 @@ async function runCommand(cmd: string, args: string[], label: string): Promise<v
     log(`[MLX-Setup] ${label}: ${cmd} ${args.join(' ')}`);
     const proc = spawn(cmd, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PATH: `${path.join(VENV_DIR, 'bin')}:${process.env.PATH}` },
+      env: getSpawnEnv(),
     });
 
     let stderr = '';
@@ -51,7 +106,6 @@ async function runCommand(cmd: string, args: string[], label: string): Promise<v
     proc.stderr?.on('data', (d) => {
       const line = d.toString().trim();
       stderr += line + '\n';
-      // Only log non-progress lines
       if (!line.includes('━') && !line.includes('%')) {
         log(`[MLX-Setup] ${line}`);
       }
@@ -70,7 +124,7 @@ async function runCommand(cmd: string, args: string[], label: string): Promise<v
   });
 }
 
-export async function ensureMLXSetup(onProgress?: (msg: string) => void): Promise<boolean> {
+export async function ensureMLXSetup(onProgress?: ProgressCallback): Promise<boolean> {
   if (setupInProgress) {
     log('[MLX-Setup] Setup already in progress');
     return false;
@@ -78,29 +132,30 @@ export async function ensureMLXSetup(onProgress?: (msg: string) => void): Promis
   setupInProgress = true;
 
   try {
-    // Step 1: Create venv if needed
+    // Step 1: Create venv
     if (!venvExists()) {
-      const msg = 'Creating Python environment for MLX Whisper...';
-      log(`[MLX-Setup] ${msg}`);
-      onProgress?.(msg);
-
-      await runCommand('python3', ['-m', 'venv', VENV_DIR], 'Create venv');
+      onProgress?.('venv', 'active', 'Creating Python environment...');
+      const python = findPython3();
+      log(`[MLX-Setup] Using Python: ${python}`);
+      await runCommand(python, ['-m', 'venv', VENV_DIR], 'Create venv');
     }
+    onProgress?.('venv', 'done', 'Python environment ready');
 
-    // Step 2: Install mlx-whisper if needed
-    const msg = 'Installing mlx-whisper (first time only, this may take a minute)...';
-    log(`[MLX-Setup] ${msg}`);
-    onProgress?.(msg);
+    // Step 2: Install mlx-whisper
+    onProgress?.('install', 'active', 'Installing MLX Whisper (this may take a minute)...');
+    await runCommand(
+      VENV_PYTHON,
+      ['-m', 'pip', 'install', '--quiet', 'mlx-whisper'],
+      'Install mlx-whisper'
+    );
+    onProgress?.('install', 'done', 'MLX Whisper installed');
 
-    // Always ensure mlx-whisper is present (pip handles no-op if already installed)
-    await runCommand(VENV_PYTHON, ['-m', 'pip', 'install', '--quiet', 'mlx-whisper'], 'Install mlx-whisper');
-
+    markSetupDone();
     log('[MLX-Setup] MLX Whisper setup complete');
-    onProgress?.('MLX Whisper ready!');
     return true;
   } catch (err) {
     logError('[MLX-Setup] Setup failed:', err);
-    onProgress?.(`Setup failed: ${(err as Error).message}`);
+    onProgress?.('error', 'error', `Setup failed: ${(err as Error).message}`);
     return false;
   } finally {
     setupInProgress = false;
@@ -109,22 +164,15 @@ export async function ensureMLXSetup(onProgress?: (msg: string) => void): Promis
 
 // --- Server Lifecycle ---
 
-export async function startMLXServer(): Promise<boolean> {
+export async function startMLXServer(onProgress?: ProgressCallback): Promise<boolean> {
   if (serverProcess && serverReady) {
     log('[MLX-Server] Already running');
     return true;
   }
 
-  // Kill any stale process
   await stopMLXServer();
 
-  // Ensure venv + mlx-whisper installed
-  const setupOk = await ensureMLXSetup((msg) => {
-    new Notification({
-      title: 'WhisperAlone',
-      body: msg,
-    }).show();
-  });
+  const setupOk = await ensureMLXSetup(onProgress);
 
   if (!setupOk) {
     dialog.showMessageBoxSync({
@@ -136,17 +184,16 @@ export async function startMLXServer(): Promise<boolean> {
     return false;
   }
 
-  // Start the server
+  // Step 3: Start server
+  onProgress?.('server', 'active', 'Starting local transcription server...');
+
   return new Promise((resolve) => {
     const scriptPath = getServerScriptPath();
     log(`[MLX-Server] Starting: ${VENV_PYTHON} ${scriptPath} ${MLX_SERVER_PORT}`);
 
     serverProcess = spawn(VENV_PYTHON, [scriptPath, String(MLX_SERVER_PORT)], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        PATH: `${path.join(VENV_DIR, 'bin')}:${process.env.PATH}`,
-      },
+      env: getSpawnEnv(),
     });
 
     let resolved = false;
@@ -154,6 +201,7 @@ export async function startMLXServer(): Promise<boolean> {
       if (!resolved) {
         resolved = true;
         logError('[MLX-Server] Startup timed out after 30s');
+        onProgress?.('server', 'error', 'Server startup timed out');
         resolve(false);
       }
     }, 30000);
@@ -166,6 +214,8 @@ export async function startMLXServer(): Promise<boolean> {
         clearTimeout(timeout);
         serverReady = true;
         log('[MLX-Server] Server is ready');
+        onProgress?.('server', 'done', 'Server started');
+        onProgress?.('done', 'done', 'WhisperAlone is ready! Double-tap ⌘ to transcribe.');
         resolve(true);
       }
     });
@@ -181,6 +231,7 @@ export async function startMLXServer(): Promise<boolean> {
       if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
+        onProgress?.('server', 'error', 'Server stopped unexpectedly');
         resolve(false);
       }
     });
@@ -192,6 +243,7 @@ export async function startMLXServer(): Promise<boolean> {
       if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
+        onProgress?.('server', 'error', `Server error: ${err.message}`);
         resolve(false);
       }
     });
@@ -206,14 +258,12 @@ export async function stopMLXServer(): Promise<void> {
 
   log('[MLX-Server] Stopping server...');
 
-  // Try graceful shutdown via HTTP
   try {
     await httpPost('/shutdown', Buffer.alloc(0), {});
   } catch {
     // Server might already be down
   }
 
-  // Give it a moment, then force kill
   await new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {
       if (serverProcess) {
@@ -288,18 +338,15 @@ export async function transcribeViaServer(audioBuffer: Buffer, modelName: string
     throw new Error('MLX server is not running. Restart the app or switch to OpenAI.');
   }
 
-  // Build multipart form data
   const boundary = `----WhisperAlone${Date.now()}`;
   const parts: Buffer[] = [];
 
-  // Model field
   parts.push(Buffer.from(
     `--${boundary}\r\n` +
     `Content-Disposition: form-data; name="model"\r\n\r\n` +
     `${modelName}\r\n`
   ));
 
-  // File field
   parts.push(Buffer.from(
     `--${boundary}\r\n` +
     `Content-Disposition: form-data; name="file"; filename="recording.webm"\r\n` +
