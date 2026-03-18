@@ -9,6 +9,7 @@ import {
   dialog,
   Notification,
   screen,
+  clipboard,
 } from 'electron';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -100,105 +101,53 @@ async function startMLXWithProgress(): Promise<void> {
 
 // --- Tray ---
 
-async function promptForApiKey(): Promise<void> {
+function pasteApiKeyFromClipboard(): void {
   const settings = getSettings();
-  const { response, checkboxChecked } = await dialog.showMessageBox({
-    type: 'question',
-    title: 'OpenAI API Key',
-    message: 'Enter your OpenAI API key to enable cloud transcription.',
-    detail: settings.openaiApiKey
-      ? 'A key is already saved. Click "Update Key" to change it, or "Remove" to delete it.'
-      : 'Get your key from platform.openai.com/api-keys\n\nPaste it using the prompt that follows.',
-    buttons: settings.openaiApiKey ? ['Update Key', 'Remove', 'Cancel'] : ['Enter Key', 'Cancel'],
-  });
 
-  if (settings.openaiApiKey && response === 1) {
-    setSettings({ openaiApiKey: '', backend: 'mlx' });
-    rebuildTrayMenu();
-    log('[Settings] OpenAI API key removed');
+  if (settings.openaiApiKey) {
+    const btn = dialog.showMessageBoxSync({
+      type: 'question',
+      title: 'OpenAI API Key',
+      message: 'A key is already saved.',
+      buttons: ['Replace from Clipboard', 'Remove Key', 'Cancel'],
+    });
+    if (btn === 1) {
+      setSettings({ openaiApiKey: '', backend: 'mlx' });
+      rebuildTrayMenu();
+      log('[Settings] OpenAI API key removed');
+      new Notification({ title: 'WhisperAlone', body: 'API key removed. Using local transcription.' }).show();
+      return;
+    }
+    if (btn !== 0) return;
+  }
+
+  const key = clipboard.readText().trim();
+
+  if (!key) {
+    dialog.showMessageBoxSync({
+      type: 'info',
+      title: 'Paste API Key',
+      message: 'Copy your OpenAI key, then click this again.',
+      detail: '1. Go to platform.openai.com/api-keys\n2. Copy your key\n3. Click "Paste API Key" again',
+    });
     return;
   }
 
-  if ((settings.openaiApiKey && response === 0) || (!settings.openaiApiKey && response === 0)) {
-    // Use a second dialog with input since Electron doesn't have a native input dialog
-    // We'll use a BrowserWindow prompt instead
-    const key = await showInputDialog('OpenAI API Key', 'Paste your API key (sk-...)');
-    if (key && key.startsWith('sk-')) {
-      setSettings({ openaiApiKey: key });
-      process.env.OPENAI_API_KEY = key;
-      rebuildTrayMenu();
-      log('[Settings] OpenAI API key saved');
-      new Notification({ title: 'WhisperAlone', body: 'API key saved. You can now use OpenAI Cloud.' }).show();
-    } else if (key) {
-      dialog.showMessageBoxSync({ type: 'error', title: 'Invalid Key', message: 'API key should start with "sk-".' });
-    }
+  if (!key.startsWith('sk-')) {
+    dialog.showMessageBoxSync({
+      type: 'error',
+      title: 'Invalid Key',
+      message: 'Clipboard doesn\'t contain an OpenAI key.',
+      detail: 'Expected a key starting with "sk-".',
+    });
+    return;
   }
-}
 
-function showInputDialog(title: string, placeholder: string): Promise<string> {
-  return new Promise((resolve) => {
-    const display = screen.getPrimaryDisplay();
-    const { width: sw, height: sh } = display.workAreaSize;
-    const w = 420;
-    const h = 180;
-
-    const inputWindow = new BrowserWindow({
-      width: w,
-      height: h,
-      x: Math.round((sw - w) / 2),
-      y: Math.round((sh - h) / 2),
-      resizable: false,
-      minimizable: false,
-      maximizable: false,
-      alwaysOnTop: true,
-      title,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, preload: preloadPath() },
-    });
-
-    const html = `<!DOCTYPE html>
-<html><head><style>
-  body { font-family: -apple-system, sans-serif; padding: 24px; background: #1a1a1a; color: #e5e5e5; }
-  h3 { font-size: 14px; margin: 0 0 12px; font-weight: 500; }
-  input { width: 100%; padding: 8px 10px; font-size: 13px; border: 1px solid #444;
-    border-radius: 6px; background: #2a2a2a; color: #e5e5e5; outline: none; font-family: monospace; }
-  input:focus { border-color: #0a84ff; }
-  .btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
-  button { padding: 6px 16px; border-radius: 6px; border: none; font-size: 13px; cursor: pointer; }
-  .save { background: #0a84ff; color: white; }
-  .cancel { background: #333; color: #ccc; }
-</style></head><body>
-  <h3>${title}</h3>
-  <input id="inp" type="password" placeholder="${placeholder}" autofocus />
-  <div class="btns">
-    <button class="cancel" onclick="window.close()">Cancel</button>
-    <button class="save" id="save">Save</button>
-  </div>
-  <script>
-    const inp = document.getElementById('inp');
-    document.getElementById('save').onclick = () => {
-      document.title = 'RESULT:' + inp.value;
-      window.close();
-    };
-    inp.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') document.getElementById('save').click();
-      if (e.key === 'Escape') window.close();
-    });
-  </script>
-</body></html>`;
-
-    inputWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-
-    inputWindow.on('page-title-updated', (_e, newTitle) => {
-      if (newTitle.startsWith('RESULT:')) {
-        resolve(newTitle.slice(7));
-        inputWindow.destroy();
-      }
-    });
-
-    inputWindow.on('closed', () => {
-      resolve('');
-    });
-  });
+  setSettings({ openaiApiKey: key });
+  process.env.OPENAI_API_KEY = key;
+  rebuildTrayMenu();
+  log('[Settings] OpenAI API key saved from clipboard');
+  new Notification({ title: 'WhisperAlone', body: 'API key saved! OpenAI Cloud is now available.' }).show();
 }
 
 function buildTrayMenu(): Menu {
@@ -243,8 +192,8 @@ function buildTrayMenu(): Menu {
       : []),
     { type: 'separator' as const },
     {
-      label: hasApiKey ? 'OpenAI API Key...' : 'Set OpenAI API Key...',
-      click: () => promptForApiKey(),
+      label: hasApiKey ? 'Change API Key...' : 'Paste API Key  (for OpenAI)',
+      click: () => pasteApiKeyFromClipboard(),
     },
     { label: 'Show History', click: () => showMainWindow() },
     { type: 'separator' as const },
