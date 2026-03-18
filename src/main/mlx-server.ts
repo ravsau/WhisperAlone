@@ -25,20 +25,22 @@ const ENHANCED_PATH = (() => {
 })();
 
 function getSpawnEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, PATH: ENHANCED_PATH };
+  // Only pass safe env vars to child processes (avoid leaking secrets like API keys)
+  return {
+    PATH: ENHANCED_PATH,
+    HOME: process.env.HOME,
+    USER: process.env.USER,
+    LANG: process.env.LANG,
+    TMPDIR: process.env.TMPDIR,
+    SHELL: process.env.SHELL,
+  };
 }
 
 function findPython3(): string {
-  // Check common locations explicitly
-  const candidates = [
-    '/opt/homebrew/bin/python3',
-    '/usr/local/bin/python3',
-    '/usr/bin/python3',
-  ];
-  for (const p of candidates) {
+  for (const dir of EXTRA_PATHS) {
+    const p = path.join(dir, 'python3');
     if (fs.existsSync(p)) return p;
   }
-  // Fallback to PATH lookup
   return 'python3';
 }
 
@@ -48,10 +50,17 @@ let setupInProgress = false;
 
 export type ProgressCallback = (step: string, state: string, message: string) => void;
 
+let cachedScriptPath: string | null = null;
+
 function getServerScriptPath(): string {
+  if (cachedScriptPath) return cachedScriptPath;
+
   // In dev mode, use the script directly
   const devPath = path.join(__dirname, '../../scripts/mlx-server.py');
-  if (fs.existsSync(devPath) && !devPath.includes('.asar')) return devPath;
+  if (fs.existsSync(devPath) && !devPath.includes('.asar')) {
+    cachedScriptPath = devPath;
+    return devPath;
+  }
 
   // In packaged app, scripts are inside app.asar which Python can't read.
   // Extract to userData so Python can access them.
@@ -59,11 +68,7 @@ function getServerScriptPath(): string {
   const extractedPath = path.join(extractDir, 'mlx-server.py');
 
   try {
-    if (!fs.existsSync(extractDir)) {
-      fs.mkdirSync(extractDir, { recursive: true });
-    }
-
-    // Always overwrite to pick up updates
+    fs.mkdirSync(extractDir, { recursive: true });
     const asarPath = path.join(__dirname, '../../scripts/mlx-server.py');
     const content = fs.readFileSync(asarPath, 'utf-8');
     fs.writeFileSync(extractedPath, content, { mode: 0o755 });
@@ -72,6 +77,7 @@ function getServerScriptPath(): string {
     logError('[MLX-Server] Failed to extract server script:', err);
   }
 
+  cachedScriptPath = extractedPath;
   return extractedPath;
 }
 

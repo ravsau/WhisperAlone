@@ -44,6 +44,12 @@ function preloadPath(): string {
   return path.join(__dirname, '../preload/preload.js');
 }
 
+const defaultWebPreferences = (): Electron.WebPreferences => ({
+  preload: preloadPath(),
+  contextIsolation: true,
+  nodeIntegration: false,
+});
+
 // --- Setup Window ---
 
 function createSetupWindow(): void {
@@ -65,11 +71,7 @@ function createSetupWindow(): void {
     skipTaskbar: true,
     hasShadow: true,
     vibrancy: 'under-window',
-    webPreferences: {
-      preload: preloadPath(),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: defaultWebPreferences(),
   });
 
   setupWindow.loadFile(rendererPath('setup.html'));
@@ -91,9 +93,7 @@ function closeSetupWindow(delayMs = 2000): void {
 
 async function startMLXWithProgress(): Promise<void> {
   createSetupWindow();
-  const ok = await startMLXServer((step, state, message) => {
-    sendSetupProgress(step, state, message);
-  });
+  const ok = await startMLXServer(sendSetupProgress);
   rebuildTrayMenu();
   closeSetupWindow(ok ? 2000 : 5000);
 }
@@ -196,11 +196,7 @@ function createMainWindow(): void {
     titleBarStyle: 'hiddenInset',
     vibrancy: 'under-window',
     backgroundColor: '#00000000',
-    webPreferences: {
-      preload: preloadPath(),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: defaultWebPreferences(),
   });
 
   mainWindow.loadFile(rendererPath('index.html'));
@@ -224,11 +220,7 @@ function createAudioWindow(): void {
     show: false,
     width: 400,
     height: 300,
-    webPreferences: {
-      preload: preloadPath(),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: defaultWebPreferences(),
   });
 
   audioWindow.loadFile(rendererPath('audio-capture.html'));
@@ -264,11 +256,7 @@ function createOverlayWindow(): void {
     movable: false,
     focusable: false,
     hasShadow: false,
-    webPreferences: {
-      preload: preloadPath(),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: defaultWebPreferences(),
   });
 
   overlayWindow.setIgnoreMouseEvents(true);
