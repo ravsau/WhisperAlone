@@ -38,13 +38,22 @@ npm install
 npm start
 ```
 
-### Build the app
+### Build and install
 
 ```bash
 npm run dist
 ```
 
-This creates a `.dmg` in `dist/`. Drag WhisperAlone to Applications and run it.
+Then install:
+
+```bash
+cp -R dist/mac-arm64/WhisperAlone.app /Applications/
+open /Applications/WhisperAlone.app
+```
+
+Or open the DMG at `dist/WhisperAlone-1.0.0-arm64.dmg` and drag WhisperAlone to Applications.
+
+The app runs as a **menu bar icon** (no dock icon). Look for the mic icon in the top-right of your screen.
 
 ### macOS Permissions
 
