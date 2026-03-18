@@ -6,8 +6,9 @@ import { transcribeViaServer } from './mlx-server';
 // --- OpenAI backend ---
 
 function getOpenAIClient(): OpenAI {
+  const settings = getSettings();
   return new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
+    apiKey: settings.openaiApiKey || process.env.OPENAI_API_KEY,
   });
 }
 

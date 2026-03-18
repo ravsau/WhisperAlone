@@ -62,7 +62,7 @@ Go to **System Settings > Privacy & Security** to grant these.
 
 Uses OpenAI's hosted Whisper model. Requires an API key.
 
-Add your key to `~/.env`:
+Click the tray icon > **Set OpenAI API Key...** to paste your key. It's stored locally in the app's data directory. Alternatively, add it to `~/.env`:
 
 ```
 OPENAI_API_KEY=sk-your-key-here
@@ -90,7 +90,7 @@ No manual `pip install` required.
 
 ### Switching Modes
 
-Click the menu bar icon to toggle between Fast and Quality. If you have an OpenAI API key configured in `~/.env`, a third "OpenAI Cloud" option appears in the menu.
+Click the menu bar icon to switch between Local and OpenAI Cloud. To enable cloud mode, click **Set OpenAI API Key...** and paste your key.
 
 ### Benchmarks
 

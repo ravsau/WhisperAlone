@@ -11,6 +11,7 @@ export interface TranscriptionEntry {
 export interface AppSettings {
   backend: TranscriberBackend;
   mlxModel: string;
+  openaiApiKey: string;
 }
 
 interface StoreSchema {
@@ -21,6 +22,7 @@ interface StoreSchema {
 const DEFAULT_SETTINGS: AppSettings = {
   backend: 'mlx',
   mlxModel: 'mlx-community/whisper-large-v3-turbo',
+  openaiApiKey: '',
 };
 
 const store = new Conf<StoreSchema>({

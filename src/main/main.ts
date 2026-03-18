@@ -13,7 +13,7 @@ import {
 import path from 'path';
 import dotenv from 'dotenv';
 import { HotkeyManager } from './hotkey';
-import { transcribeAudio, MLX_MODELS } from './transcriber';
+import { transcribeAudio } from './transcriber';
 import { injectText } from './injector';
 import { addHistoryEntry, getHistory, getSettings, setSettings } from './store';
 import { log, logError } from './logger';
@@ -100,10 +100,111 @@ async function startMLXWithProgress(): Promise<void> {
 
 // --- Tray ---
 
+async function promptForApiKey(): Promise<void> {
+  const settings = getSettings();
+  const { response, checkboxChecked } = await dialog.showMessageBox({
+    type: 'question',
+    title: 'OpenAI API Key',
+    message: 'Enter your OpenAI API key to enable cloud transcription.',
+    detail: settings.openaiApiKey
+      ? 'A key is already saved. Click "Update Key" to change it, or "Remove" to delete it.'
+      : 'Get your key from platform.openai.com/api-keys\n\nPaste it using the prompt that follows.',
+    buttons: settings.openaiApiKey ? ['Update Key', 'Remove', 'Cancel'] : ['Enter Key', 'Cancel'],
+  });
+
+  if (settings.openaiApiKey && response === 1) {
+    setSettings({ openaiApiKey: '', backend: 'mlx' });
+    rebuildTrayMenu();
+    log('[Settings] OpenAI API key removed');
+    return;
+  }
+
+  if ((settings.openaiApiKey && response === 0) || (!settings.openaiApiKey && response === 0)) {
+    // Use a second dialog with input since Electron doesn't have a native input dialog
+    // We'll use a BrowserWindow prompt instead
+    const key = await showInputDialog('OpenAI API Key', 'Paste your API key (sk-...)');
+    if (key && key.startsWith('sk-')) {
+      setSettings({ openaiApiKey: key });
+      process.env.OPENAI_API_KEY = key;
+      rebuildTrayMenu();
+      log('[Settings] OpenAI API key saved');
+      new Notification({ title: 'WhisperAlone', body: 'API key saved. You can now use OpenAI Cloud.' }).show();
+    } else if (key) {
+      dialog.showMessageBoxSync({ type: 'error', title: 'Invalid Key', message: 'API key should start with "sk-".' });
+    }
+  }
+}
+
+function showInputDialog(title: string, placeholder: string): Promise<string> {
+  return new Promise((resolve) => {
+    const display = screen.getPrimaryDisplay();
+    const { width: sw, height: sh } = display.workAreaSize;
+    const w = 420;
+    const h = 180;
+
+    const inputWindow = new BrowserWindow({
+      width: w,
+      height: h,
+      x: Math.round((sw - w) / 2),
+      y: Math.round((sh - h) / 2),
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      alwaysOnTop: true,
+      title,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, preload: preloadPath() },
+    });
+
+    const html = `<!DOCTYPE html>
+<html><head><style>
+  body { font-family: -apple-system, sans-serif; padding: 24px; background: #1a1a1a; color: #e5e5e5; }
+  h3 { font-size: 14px; margin: 0 0 12px; font-weight: 500; }
+  input { width: 100%; padding: 8px 10px; font-size: 13px; border: 1px solid #444;
+    border-radius: 6px; background: #2a2a2a; color: #e5e5e5; outline: none; font-family: monospace; }
+  input:focus { border-color: #0a84ff; }
+  .btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  button { padding: 6px 16px; border-radius: 6px; border: none; font-size: 13px; cursor: pointer; }
+  .save { background: #0a84ff; color: white; }
+  .cancel { background: #333; color: #ccc; }
+</style></head><body>
+  <h3>${title}</h3>
+  <input id="inp" type="password" placeholder="${placeholder}" autofocus />
+  <div class="btns">
+    <button class="cancel" onclick="window.close()">Cancel</button>
+    <button class="save" id="save">Save</button>
+  </div>
+  <script>
+    const inp = document.getElementById('inp');
+    document.getElementById('save').onclick = () => {
+      document.title = 'RESULT:' + inp.value;
+      window.close();
+    };
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') document.getElementById('save').click();
+      if (e.key === 'Escape') window.close();
+    });
+  </script>
+</body></html>`;
+
+    inputWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+
+    inputWindow.on('page-title-updated', (_e, newTitle) => {
+      if (newTitle.startsWith('RESULT:')) {
+        resolve(newTitle.slice(7));
+        inputWindow.destroy();
+      }
+    });
+
+    inputWindow.on('closed', () => {
+      resolve('');
+    });
+  });
+}
+
 function buildTrayMenu(): Menu {
   const settings = getSettings();
   const mlxRunning = isMLXServerRunning();
-  const hasApiKey = !!process.env.OPENAI_API_KEY;
+  const hasApiKey = !!(settings.openaiApiKey || process.env.OPENAI_API_KEY);
 
   // Show transient status only when server is loading
   const statusItems = (settings.backend === 'mlx' && !mlxRunning)
@@ -112,38 +213,39 @@ function buildTrayMenu(): Menu {
 
   return Menu.buildFromTemplate([
     ...statusItems,
-    // Local model choices: Fast vs Quality
-    ...MLX_MODELS.map((model) => ({
-      label: `${model.label}  (${model.description})`,
+    // Local: just Fast (turbo) -- the recommended default
+    {
+      label: 'Local  (on-device, ~0.7s)',
       type: 'radio' as const,
-      checked: settings.backend === 'mlx' && settings.mlxModel === model.id,
+      checked: settings.backend === 'mlx',
       click: async () => {
-        setSettings({ mlxModel: model.id, backend: 'mlx' });
+        setSettings({ backend: 'mlx' });
         rebuildTrayMenu();
-        log(`[Settings] Selected: ${model.label} (${model.id})`);
+        log('[Settings] Switched to MLX local');
         if (!isMLXServerRunning()) {
           await startMLXWithProgress();
         }
       },
-    })),
-    // Only show OpenAI if user has an API key configured
+    },
+    // OpenAI Cloud option
     ...(hasApiKey
-      ? [
-          { type: 'separator' as const },
-          {
-            label: 'OpenAI Cloud',
-            type: 'radio' as const,
-            checked: settings.backend === 'openai',
-            click: async () => {
-              setSettings({ backend: 'openai' });
-              await stopMLXServer();
-              rebuildTrayMenu();
-              log('[Settings] Switched to OpenAI backend');
-            },
+      ? [{
+          label: 'OpenAI Cloud',
+          type: 'radio' as const,
+          checked: settings.backend === 'openai',
+          click: async () => {
+            setSettings({ backend: 'openai' });
+            await stopMLXServer();
+            rebuildTrayMenu();
+            log('[Settings] Switched to OpenAI backend');
           },
-        ]
+        }]
       : []),
     { type: 'separator' as const },
+    {
+      label: hasApiKey ? 'OpenAI API Key...' : 'Set OpenAI API Key...',
+      click: () => promptForApiKey(),
+    },
     { label: 'Show History', click: () => showMainWindow() },
     { type: 'separator' as const },
     { label: 'Quit WhisperAlone', click: () => app.quit() },
@@ -265,16 +367,10 @@ function hideOverlayNow(): void {
 // --- Permissions ---
 
 function checkPermissions(): void {
+  // Load stored API key into process.env for OpenAI SDK
   const settings = getSettings();
-
-  if (settings.backend === 'openai' && !process.env.OPENAI_API_KEY) {
-    dialog.showMessageBoxSync({
-      type: 'warning',
-      title: 'Missing API Key',
-      message: 'OPENAI_API_KEY not found.',
-      detail:
-        'Create a ~/.env file with:\nOPENAI_API_KEY=sk-your-key-here\n\nOr switch to MLX Local mode from the tray menu to use on-device transcription.',
-    });
+  if (settings.openaiApiKey) {
+    process.env.OPENAI_API_KEY = settings.openaiApiKey;
   }
 
   const isTrusted = systemPreferences.isTrustedAccessibilityClient(false);
@@ -379,11 +475,15 @@ function setupIPC(): void {
     const safe: Record<string, unknown> = {};
     if (input.backend === 'openai' || input.backend === 'mlx') safe.backend = input.backend;
     if (typeof input.mlxModel === 'string') safe.mlxModel = input.mlxModel;
+    if (typeof input.openaiApiKey === 'string') safe.openaiApiKey = input.openaiApiKey;
     const updated = setSettings(safe);
     rebuildTrayMenu();
     return updated;
   });
-  ipcMain.handle('get-mlx-models', () => MLX_MODELS);
+  ipcMain.handle('get-mlx-models', () => {
+    const { MLX_MODELS } = require('./transcriber');
+    return MLX_MODELS;
+  });
 }
 
 // --- App Lifecycle ---
