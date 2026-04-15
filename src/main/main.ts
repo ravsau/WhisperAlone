@@ -22,6 +22,10 @@ import {
   startMLXServer, stopMLXServer, isMLXServerRunning, isFirstBoot, setServerCrashHandler,
   startStreamingSession, sendStreamChunk, finishStreamingSession, isStreamingActive,
 } from './mlx-server';
+import {
+  routeTranscription, exportTodayHistory, generateDailyDigest,
+  isOllamaAvailable, openNotesFolder,
+} from './voice-router';
 
 import os from 'os';
 
@@ -199,6 +203,48 @@ function buildTrayMenu(): Menu {
       click: () => pasteApiKeyFromClipboard(),
     },
     { label: 'Show History', click: () => showMainWindow() },
+    { type: 'separator' as const },
+    {
+      label: 'Voice Modes: say "journal:", "todo:", or "note:"',
+      enabled: false as const,
+    },
+    {
+      label: 'Export Today\'s History...',
+      click: () => {
+        const file = exportTodayHistory();
+        if (file) {
+          new Notification({ title: 'WhisperAlone', body: `Exported to ${file}` }).show();
+        } else {
+          new Notification({ title: 'WhisperAlone', body: 'No transcriptions today.' }).show();
+        }
+      },
+    },
+    {
+      label: 'Summarize My Day (Ollama)',
+      click: async () => {
+        const available = await isOllamaAvailable();
+        if (!available) {
+          dialog.showMessageBoxSync({
+            type: 'info',
+            title: 'Ollama Not Found',
+            message: 'Ollama is not running.',
+            detail: 'Install Ollama (ollama.com) and run:\n  ollama pull llama3.2:1b\n\nThen try again.',
+          });
+          return;
+        }
+        new Notification({ title: 'WhisperAlone', body: 'Generating daily summary...' }).show();
+        const digest = await generateDailyDigest();
+        if (digest) {
+          new Notification({ title: 'WhisperAlone', body: `Summary saved to journal.` }).show();
+        } else {
+          new Notification({ title: 'WhisperAlone', body: 'No transcriptions today or summary failed.' }).show();
+        }
+      },
+    },
+    {
+      label: 'Open Notes Folder',
+      click: () => openNotesFolder(),
+    },
     { type: 'separator' as const },
     { label: 'Quit WhisperAlone', click: () => app.quit() },
   ]);
@@ -414,7 +460,15 @@ function setupIPC(): void {
 
       if (text && text.length > 0) {
         log(`[WhisperAlone] Transcribed: "${text}"`);
-        await injectText(text);
+
+        // Check for voice mode prefixes (journal:, todo:, note:)
+        const route = routeTranscription(text);
+        if (route.action === 'paste') {
+          await injectText(text);
+        } else {
+          log(`[WhisperAlone] Routed to ${route.destination}`);
+        }
+
         addHistoryEntry(text, buffer.length);
         mainWindow?.webContents.send('history-update', getHistory());
       } else {
