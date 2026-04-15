@@ -4,3 +4,4 @@ dist/
 *.dmg
 out/
 .DS_Store
+TODO.md
