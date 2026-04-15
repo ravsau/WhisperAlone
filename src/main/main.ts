@@ -18,7 +18,7 @@ import { transcribeAudio } from './transcriber';
 import { injectText } from './injector';
 import { addHistoryEntry, getHistory, getSettings, setSettings } from './store';
 import { log, logError } from './logger';
-import { startMLXServer, stopMLXServer, isMLXServerRunning, isFirstBoot } from './mlx-server';
+import { startMLXServer, stopMLXServer, isMLXServerRunning, isFirstBoot, setServerCrashHandler } from './mlx-server';
 
 import os from 'os';
 
@@ -447,6 +447,7 @@ app.whenReady().then(async () => {
   checkPermissions();
   setupIPC();
   setupHotkey();
+  setServerCrashHandler(() => rebuildTrayMenu());
 
   const settings = getSettings();
   const firstBoot = isFirstBoot();

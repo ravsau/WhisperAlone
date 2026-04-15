@@ -1,9 +1,11 @@
 import { ChildProcess, spawn } from 'child_process';
+import net from 'net';
 import path from 'path';
 import fs from 'fs';
 import http from 'http';
 import { app, dialog } from 'electron';
 import { log, logError } from './logger';
+import { getSettings } from './store';
 
 const MLX_SERVER_PORT = 18456;
 const VENV_DIR = path.join(app.getPath('userData'), 'mlx-venv');
@@ -47,6 +49,45 @@ function findPython3(): string {
 let serverProcess: ChildProcess | null = null;
 let serverReady = false;
 let setupInProgress = false;
+let restartInProgress = false;
+let onServerCrash: (() => void) | null = null;
+
+function isPortInUse(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(true));
+    server.once('listening', () => {
+      server.close();
+      resolve(false);
+    });
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+async function waitForPortFree(port: number, timeoutMs: number): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!(await isPortInUse(port))) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  log(`[MLX-Server] Warning: port ${port} still in use after ${timeoutMs}ms`);
+}
+
+function killProcessOnPort(): Promise<void> {
+  return new Promise((resolve) => {
+    const proc = spawn('lsof', ['-ti', `:${MLX_SERVER_PORT}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let pids = '';
+    proc.stdout?.on('data', (d) => { pids += d.toString(); });
+    proc.on('close', () => {
+      const pidList = pids.trim().split('\n').filter(Boolean);
+      for (const pid of pidList) {
+        try { process.kill(Number(pid), 'SIGKILL'); } catch {}
+      }
+      resolve();
+    });
+    proc.on('error', () => resolve());
+  });
+}
 
 export type ProgressCallback = (step: string, state: string, message: string) => void;
 
@@ -195,9 +236,11 @@ export async function startMLXServer(onProgress?: ProgressCallback): Promise<boo
 
   return new Promise((resolve) => {
     const scriptPath = getServerScriptPath();
-    log(`[MLX-Server] Starting: ${VENV_PYTHON} ${scriptPath} ${MLX_SERVER_PORT}`);
+    const modelName = getSettings().mlxModel;
+    const args = [scriptPath, String(MLX_SERVER_PORT), '--preload', modelName];
+    log(`[MLX-Server] Starting: ${VENV_PYTHON} ${args.join(' ')}`);
 
-    serverProcess = spawn(VENV_PYTHON, [scriptPath, String(MLX_SERVER_PORT)], {
+    serverProcess = spawn(VENV_PYTHON, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: getSpawnEnv(),
     });
@@ -206,11 +249,11 @@ export async function startMLXServer(onProgress?: ProgressCallback): Promise<boo
     const timeout = setTimeout(() => {
       if (!resolved) {
         resolved = true;
-        logError('[MLX-Server] Startup timed out after 30s');
+        logError('[MLX-Server] Startup timed out after 120s');
         onProgress?.('server', 'error', 'Server startup timed out');
         resolve(false);
       }
-    }, 30000);
+    }, 120000);
 
     serverProcess.stdout?.on('data', (data) => {
       const line = data.toString().trim();
@@ -233,12 +276,17 @@ export async function startMLXServer(onProgress?: ProgressCallback): Promise<boo
     serverProcess.on('close', (code) => {
       log(`[MLX-Server] Process exited with code ${code}`);
       serverProcess = null;
+      const wasReady = serverReady;
       serverReady = false;
       if (!resolved) {
         resolved = true;
         clearTimeout(timeout);
         onProgress?.('server', 'error', 'Server stopped unexpectedly');
         resolve(false);
+      } else if (wasReady) {
+        // Server crashed after it was running — auto-restart
+        log('[MLX-Server] Server crashed, scheduling auto-restart...');
+        scheduleRestart();
       }
     });
 
@@ -259,6 +307,8 @@ export async function startMLXServer(onProgress?: ProgressCallback): Promise<boo
 export async function stopMLXServer(): Promise<void> {
   if (!serverProcess) {
     serverReady = false;
+    // Kill any orphaned process on our port
+    await killProcessOnPort();
     return;
   }
 
@@ -293,11 +343,38 @@ export async function stopMLXServer(): Promise<void> {
   });
 
   serverReady = false;
+
+  // Wait for the port to actually become free
+  await waitForPortFree(MLX_SERVER_PORT, 5000);
+
   log('[MLX-Server] Stopped');
 }
 
 export function isMLXServerRunning(): boolean {
   return serverReady && serverProcess !== null;
+}
+
+export function setServerCrashHandler(handler: () => void): void {
+  onServerCrash = handler;
+}
+
+function scheduleRestart(): void {
+  if (restartInProgress) return;
+  restartInProgress = true;
+  setTimeout(async () => {
+    try {
+      log('[MLX-Server] Auto-restarting...');
+      const ok = await startMLXServer();
+      if (ok) {
+        log('[MLX-Server] Auto-restart succeeded');
+      } else {
+        log('[MLX-Server] Auto-restart failed');
+      }
+      onServerCrash?.();
+    } finally {
+      restartInProgress = false;
+    }
+  }, 2000);
 }
 
 // --- HTTP Client ---
@@ -341,7 +418,12 @@ function httpPost(urlPath: string, body: Buffer, headers: Record<string, string>
 
 export async function transcribeViaServer(audioBuffer: Buffer, modelName: string): Promise<string> {
   if (!serverReady) {
-    throw new Error('MLX server is not running. Restart the app or switch to OpenAI.');
+    // Try to restart the server before giving up
+    log('[MLX-Server] Server not ready, attempting restart before transcription...');
+    const ok = await startMLXServer();
+    if (!ok) {
+      throw new Error('MLX server is not running. Restart the app or switch to OpenAI.');
+    }
   }
 
   const boundary = `----WhisperAlone${Date.now()}`;

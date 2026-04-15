@@ -19,16 +19,42 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 _current_model_name = None
+_mlx_whisper = None
 
 
 def get_transcriber(model_name):
+    global _current_model_name, _mlx_whisper
+    if _mlx_whisper is None:
+        try:
+            import mlx_whisper
+            _mlx_whisper = mlx_whisper
+        except ImportError:
+            raise ImportError("mlx-whisper not installed")
+    _current_model_name = model_name
+    return _mlx_whisper
+
+
+def prewarm_model(model_name):
+    """Load model into memory at startup by running a tiny transcription."""
     global _current_model_name
+    print(f"[MLX-Server] Pre-warming model: {model_name}", file=sys.stderr, flush=True)
     try:
-        import mlx_whisper
-        _current_model_name = model_name
-        return mlx_whisper
-    except ImportError:
-        raise ImportError("mlx-whisper not installed")
+        mlx_whisper = get_transcriber(model_name)
+        # Create a short silent WAV file to force model loading
+        import struct
+        import wave
+        silence_path = os.path.join(tempfile.gettempdir(), "whisperalone_prewarm.wav")
+        with wave.open(silence_path, "w") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            # 0.5 seconds of silence
+            wf.writeframes(struct.pack("<" + "h" * 8000, *([0] * 8000)))
+        mlx_whisper.transcribe(silence_path, path_or_hf_repo=model_name)
+        os.unlink(silence_path)
+        print(f"[MLX-Server] Model pre-warmed successfully", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[MLX-Server] Pre-warm failed (non-fatal): {e}", file=sys.stderr, flush=True)
 
 
 def parse_multipart(body, boundary):
@@ -146,6 +172,17 @@ class TranscribeHandler(BaseHTTPRequestHandler):
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 18456
+
+    # Parse --preload <model_name> to pre-warm the model at startup
+    preload_model = None
+    if "--preload" in sys.argv:
+        idx = sys.argv.index("--preload")
+        if idx + 1 < len(sys.argv):
+            preload_model = sys.argv[idx + 1]
+
+    if preload_model:
+        prewarm_model(preload_model)
+
     server = HTTPServer(("127.0.0.1", port), TranscribeHandler)
     print(f"MLX_SERVER_READY port={port}", flush=True)
     print(f"[MLX-Server] Listening on http://127.0.0.1:{port}", file=sys.stderr, flush=True)
