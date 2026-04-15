@@ -286,6 +286,8 @@ function createMainWindow(): void {
   mainWindow.on('close', (e) => {
     e.preventDefault();
     mainWindow?.hide();
+    // Hide dock icon when no windows are visible (back to tray-only)
+    app.dock?.hide();
   });
 }
 
@@ -293,6 +295,8 @@ function showMainWindow(): void {
   if (!mainWindow) {
     createMainWindow();
   }
+  // Show dock icon so the app menu bar appears
+  app.dock?.show();
   mainWindow?.show();
   mainWindow?.focus();
 }
@@ -535,7 +539,36 @@ function setupIPC(): void {
 // --- App Lifecycle ---
 
 app.whenReady().then(async () => {
-  app.dock?.hide();
+  // Set up macOS application menu (shows in menu bar with Cmd+Q support)
+  const appMenu = Menu.buildFromTemplate([
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { label: 'Show History', click: () => showMainWindow() },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+  ]);
+  Menu.setApplicationMenu(appMenu);
 
   createTray();
   createMainWindow();
