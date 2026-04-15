@@ -347,6 +347,21 @@ function createOverlayWindow(): void {
 }
 
 function showOverlay(): void {
+  // Reposition overlay to the screen where the cursor currently is
+  if (overlayWindow) {
+    const cursorPoint = screen.getCursorScreenPoint();
+    const display = screen.getDisplayNearestPoint(cursorPoint);
+    const { x: sx, y: sy } = display.workArea;
+    const { width: sw, height: sh } = display.workAreaSize;
+    const overlayWidth = 280;
+    const overlayHeight = 56;
+    overlayWindow.setBounds({
+      x: Math.round(sx + (sw - overlayWidth) / 2),
+      y: Math.round(sy + sh - overlayHeight - 40),
+      width: overlayWidth,
+      height: overlayHeight,
+    });
+  }
   overlayWindow?.webContents.send('start-recording');
   overlayWindow?.showInactive();
 }
