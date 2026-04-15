@@ -35,7 +35,7 @@ dotenv.config({ path: path.join(os.homedir(), '.env') });
 let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
 let audioWindow: BrowserWindow | null = null;
-let overlayWindow: BrowserWindow | null = null;
+let overlayWindows: BrowserWindow[] = [];
 let setupWindow: BrowserWindow | null = null;
 let hotkey: HotkeyManager | null = null;
 
@@ -322,17 +322,18 @@ function createAudioWindow(): void {
 
 // --- Overlay ---
 
-function createOverlayWindow(): void {
-  const display = screen.getPrimaryDisplay();
-  const { width: screenWidth, height: screenHeight } = display.workAreaSize;
-  const overlayWidth = 280;
-  const overlayHeight = 56;
+const OVERLAY_WIDTH = 280;
+const OVERLAY_HEIGHT = 56;
 
-  overlayWindow = new BrowserWindow({
-    width: overlayWidth,
-    height: overlayHeight,
-    x: Math.round((screenWidth - overlayWidth) / 2),
-    y: screenHeight - overlayHeight - 40,
+function createOverlayForDisplay(display: Electron.Display): BrowserWindow {
+  const { x: sx, y: sy } = display.workArea;
+  const { width: sw, height: sh } = display.workAreaSize;
+
+  const win = new BrowserWindow({
+    width: OVERLAY_WIDTH,
+    height: OVERLAY_HEIGHT,
+    x: Math.round(sx + (sw - OVERLAY_WIDTH) / 2),
+    y: Math.round(sy + sh - OVERLAY_HEIGHT - 40),
     show: false,
     frame: false,
     transparent: true,
@@ -345,40 +346,59 @@ function createOverlayWindow(): void {
     webPreferences: defaultWebPreferences(),
   });
 
-  overlayWindow.setIgnoreMouseEvents(true);
-  overlayWindow.setVisibleOnAllWorkspaces(true);
-  overlayWindow.loadFile(rendererPath('overlay.html'));
+  win.setIgnoreMouseEvents(true);
+  win.setVisibleOnAllWorkspaces(true);
+  win.loadFile(rendererPath('overlay.html'));
+  return win;
+}
+
+function createOverlayWindows(): void {
+  // Close any existing overlays
+  for (const win of overlayWindows) {
+    if (!win.isDestroyed()) win.close();
+  }
+  overlayWindows = [];
+
+  // Create one overlay per display
+  const displays = screen.getAllDisplays();
+  for (const display of displays) {
+    overlayWindows.push(createOverlayForDisplay(display));
+  }
+  log(`[Main] Created ${overlayWindows.length} overlay(s) for ${displays.length} display(s)`);
 }
 
 function showOverlay(): void {
-  // Reposition overlay to the screen where the cursor currently is
-  if (overlayWindow) {
-    const cursorPoint = screen.getCursorScreenPoint();
-    const display = screen.getDisplayNearestPoint(cursorPoint);
-    const { x: sx, y: sy } = display.workArea;
-    const { width: sw, height: sh } = display.workAreaSize;
-    const overlayWidth = 280;
-    const overlayHeight = 56;
-    overlayWindow.setBounds({
-      x: Math.round(sx + (sw - overlayWidth) / 2),
-      y: Math.round(sy + sh - overlayHeight - 40),
-      width: overlayWidth,
-      height: overlayHeight,
-    });
+  // Recreate overlays if display count changed (monitor plugged/unplugged)
+  const displayCount = screen.getAllDisplays().length;
+  if (overlayWindows.length !== displayCount) {
+    createOverlayWindows();
   }
-  overlayWindow?.webContents.send('start-recording');
-  overlayWindow?.showInactive();
+
+  for (const win of overlayWindows) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('start-recording');
+      win.showInactive();
+    }
+  }
 }
 
 function hideOverlay(): void {
-  overlayWindow?.webContents.send('stop-recording');
+  for (const win of overlayWindows) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('stop-recording');
+    }
+  }
   setTimeout(() => {
-    overlayWindow?.hide();
+    for (const win of overlayWindows) {
+      if (!win.isDestroyed()) win.hide();
+    }
   }, 500);
 }
 
 function hideOverlayNow(): void {
-  overlayWindow?.hide();
+  for (const win of overlayWindows) {
+    if (!win.isDestroyed()) win.hide();
+  }
 }
 
 // --- Permissions ---
@@ -573,7 +593,7 @@ app.whenReady().then(async () => {
   createTray();
   createMainWindow();
   createAudioWindow();
-  createOverlayWindow();
+  createOverlayWindows();
   checkPermissions();
   setupIPC();
   setupHotkey();
@@ -608,6 +628,8 @@ app.on('before-quit', async () => {
   mainWindow?.removeAllListeners('close');
   mainWindow?.close();
   audioWindow?.close();
-  overlayWindow?.close();
+  for (const win of overlayWindows) {
+    if (!win.isDestroyed()) win.close();
+  }
   setupWindow?.close();
 });
