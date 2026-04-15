@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
-import http from 'http';
 import { app, Notification, shell } from 'electron';
 import { log, logError } from './logger';
 import { getHistory, TranscriptionEntry } from './store';
+import { mlxGenerate, isMLXServerRunning } from './mlx-server';
 
 const NOTES_DIR = path.join(app.getPath('home'), 'WhisperAlone');
 const JOURNAL_DIR = path.join(NOTES_DIR, 'journal');
@@ -144,7 +144,7 @@ export function exportTodayHistory(): string | null {
   return file;
 }
 
-// --- Daily Digest via Ollama ---
+// --- Daily Digest via MLX LLM ---
 
 export async function generateDailyDigest(): Promise<string | null> {
   const history = getHistory();
@@ -158,7 +158,6 @@ export async function generateDailyDigest(): Promise<string | null> {
     return null;
   }
 
-  // Build the transcript of the day
   const transcript = [...todayEntries].reverse().map((e) => {
     const time = new Date(e.timestamp).toLocaleTimeString('en-US', {
       hour: 'numeric',
@@ -168,14 +167,12 @@ export async function generateDailyDigest(): Promise<string | null> {
     return `[${time}] ${e.text}`;
   }).join('\n\n');
 
-  // Try Ollama
   const prompt = `Here are voice transcriptions from today. Summarize the key themes, decisions, action items, and any important thoughts. Be concise and useful.\n\n${transcript}`;
 
   try {
-    const result = await ollamaGenerate(prompt);
+    const result = await mlxGenerate(prompt);
     if (!result) return null;
 
-    // Save digest to journal
     ensureDir(JOURNAL_DIR);
     const file = path.join(JOURNAL_DIR, `${todayDateStr()}.md`);
     const digestEntry = `## Daily Summary\n\n${result}\n\n---\n\n`;
@@ -189,58 +186,8 @@ export async function generateDailyDigest(): Promise<string | null> {
   }
 }
 
-async function ollamaGenerate(prompt: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const body = JSON.stringify({
-      model: 'llama3.2:1b',
-      prompt,
-      stream: false,
-    });
-
-    const req = http.request(
-      {
-        hostname: '127.0.0.1',
-        port: 11434,
-        path: '/api/generate',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        timeout: 60000,
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(data);
-            resolve(parsed.response?.trim() || null);
-          } catch {
-            resolve(null);
-          }
-        });
-      }
-    );
-
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
-    req.write(body);
-    req.end();
-  });
-}
-
-export function isOllamaAvailable(): Promise<boolean> {
-  return new Promise((resolve) => {
-    const req = http.request(
-      { hostname: '127.0.0.1', port: 11434, path: '/api/tags', method: 'GET', timeout: 2000 },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => resolve(res.statusCode === 200));
-      }
-    );
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
-    req.end();
-  });
+export function isMLXLLMAvailable(): boolean {
+  return isMLXServerRunning();
 }
 
 export function openNotesFolder(): void {

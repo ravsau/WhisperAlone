@@ -21,6 +21,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 _current_model_name = None
 _mlx_whisper = None
 
+# --- LLM state ---
+_llm_model = None
+_llm_tokenizer = None
+_llm_model_name = None
+LLM_DEFAULT_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+
 
 def get_transcriber(model_name):
     global _current_model_name, _mlx_whisper
@@ -90,6 +96,26 @@ def parse_multipart(body, boundary):
     return parts
 
 
+def get_llm(model_name=None):
+    """Load or return cached LLM model and tokenizer."""
+    global _llm_model, _llm_tokenizer, _llm_model_name
+    model_name = model_name or LLM_DEFAULT_MODEL
+    if _llm_model is not None and _llm_model_name == model_name:
+        return _llm_model, _llm_tokenizer
+    print(f"[MLX-Server] Loading LLM: {model_name}", file=sys.stderr, flush=True)
+    try:
+        from mlx_lm import load
+        _llm_model, _llm_tokenizer = load(model_name)
+        _llm_model_name = model_name
+        print(f"[MLX-Server] LLM loaded: {model_name}", file=sys.stderr, flush=True)
+        return _llm_model, _llm_tokenizer
+    except ImportError:
+        raise ImportError("mlx-lm not installed")
+    except Exception as e:
+        print(f"[MLX-Server] LLM load failed: {e}", file=sys.stderr, flush=True)
+        raise
+
+
 # --- Streaming session store ---
 # Clients POST chunks to /stream/chunk and then POST /stream/finish to transcribe.
 _stream_lock = threading.Lock()
@@ -124,6 +150,9 @@ class TranscribeHandler(BaseHTTPRequestHandler):
 
         if self.path == "/transcribe":
             return self._handle_transcribe()
+
+        if self.path == "/generate":
+            return self._handle_generate()
 
         self._json_response(404, {"error": "not found"})
 
@@ -186,6 +215,47 @@ class TranscribeHandler(BaseHTTPRequestHandler):
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+    # --- LLM generate endpoint ---
+
+    def _handle_generate(self):
+        """Generate text using a local MLX LLM."""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body) if body else {}
+
+            prompt = data.get("prompt", "")
+            if not prompt:
+                self._json_response(400, {"error": "no prompt provided"})
+                return
+
+            model_name = data.get("model", LLM_DEFAULT_MODEL)
+            max_tokens = data.get("max_tokens", 512)
+
+            model, tokenizer = get_llm(model_name)
+
+            from mlx_lm import generate
+            # Apply chat template if the tokenizer supports it
+            if hasattr(tokenizer, "apply_chat_template"):
+                messages = [{"role": "user", "content": prompt}]
+                formatted = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            else:
+                formatted = prompt
+
+            response = generate(
+                model, tokenizer, prompt=formatted, max_tokens=max_tokens
+            )
+
+            self._json_response(200, {"text": response.strip()})
+
+        except ImportError as e:
+            self._json_response(500, {"error": str(e)})
+        except Exception as e:
+            print(f"[MLX-Server] Generate error: {e}", file=sys.stderr, flush=True)
+            self._json_response(500, {"error": str(e)})
 
     # --- Legacy batch endpoint (kept for fallback) ---
 

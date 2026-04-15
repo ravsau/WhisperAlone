@@ -24,7 +24,7 @@ import {
 } from './mlx-server';
 import {
   routeTranscription, exportTodayHistory, generateDailyDigest,
-  isOllamaAvailable, openNotesFolder,
+  isMLXLLMAvailable, openNotesFolder,
 } from './voice-router';
 
 import os from 'os';
@@ -220,22 +220,21 @@ function buildTrayMenu(): Menu {
       },
     },
     {
-      label: 'Summarize My Day (Ollama)',
+      label: 'Summarize My Day',
       click: async () => {
-        const available = await isOllamaAvailable();
-        if (!available) {
+        if (!isMLXLLMAvailable()) {
           dialog.showMessageBoxSync({
             type: 'info',
-            title: 'Ollama Not Found',
-            message: 'Ollama is not running.',
-            detail: 'Install Ollama (ollama.com) and run:\n  ollama pull llama3.2:1b\n\nThen try again.',
+            title: 'MLX Server Not Running',
+            message: 'The local server needs to be running for summaries.',
+            detail: 'Switch to Local mode and try again.',
           });
           return;
         }
-        new Notification({ title: 'WhisperAlone', body: 'Generating daily summary...' }).show();
+        new Notification({ title: 'WhisperAlone', body: 'Generating daily summary (first time downloads ~900MB model)...' }).show();
         const digest = await generateDailyDigest();
         if (digest) {
-          new Notification({ title: 'WhisperAlone', body: `Summary saved to journal.` }).show();
+          new Notification({ title: 'WhisperAlone', body: 'Summary saved to journal.' }).show();
         } else {
           new Notification({ title: 'WhisperAlone', body: 'No transcriptions today or summary failed.' }).show();
         }

@@ -188,14 +188,14 @@ export async function ensureMLXSetup(onProgress?: ProgressCallback): Promise<boo
     }
     onProgress?.('venv', 'done', 'Python environment ready');
 
-    // Step 2: Install mlx-whisper
-    onProgress?.('install', 'active', 'Installing MLX Whisper (this may take a minute)...');
+    // Step 2: Install mlx-whisper and mlx-lm
+    onProgress?.('install', 'active', 'Installing MLX Whisper + LM (this may take a minute)...');
     await runCommand(
       VENV_PYTHON,
-      ['-m', 'pip', 'install', '--quiet', 'mlx-whisper'],
-      'Install mlx-whisper'
+      ['-m', 'pip', 'install', '--quiet', 'mlx-whisper', 'mlx-lm'],
+      'Install mlx-whisper and mlx-lm'
     );
-    onProgress?.('install', 'done', 'MLX Whisper installed');
+    onProgress?.('install', 'done', 'MLX packages installed');
 
     markSetupDone();
     log('[MLX-Setup] MLX Whisper setup complete');
@@ -513,4 +513,26 @@ export async function transcribeViaServer(audioBuffer: Buffer, modelName: string
   }
 
   return result.text || '';
+}
+
+// --- LLM Generate API ---
+
+export async function mlxGenerate(prompt: string, maxTokens = 512): Promise<string | null> {
+  if (!serverReady) {
+    const ok = await startMLXServer();
+    if (!ok) return null;
+  }
+
+  try {
+    const body = Buffer.from(JSON.stringify({ prompt, max_tokens: maxTokens }));
+    const result = await httpPost('/generate', body, { 'Content-Type': 'application/json' });
+    if (result.error) {
+      logError('[MLX-Server] Generate error:', result.error);
+      return null;
+    }
+    return result.text || null;
+  } catch (err) {
+    logError('[MLX-Server] Generate request failed:', err);
+    return null;
+  }
 }
