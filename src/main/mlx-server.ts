@@ -416,9 +416,68 @@ function httpPost(urlPath: string, body: Buffer, headers: Record<string, string>
   });
 }
 
+// --- Streaming API ---
+
+let streamingActive = false;
+
+export async function startStreamingSession(modelName: string): Promise<boolean> {
+  if (!serverReady) {
+    const ok = await startMLXServer();
+    if (!ok) return false;
+  }
+
+  try {
+    const body = Buffer.from(JSON.stringify({ model: modelName }));
+    const result = await httpPost('/stream/start', body, { 'Content-Type': 'application/json' });
+    streamingActive = result?.status === 'ready';
+    if (streamingActive) {
+      log('[MLX-Server] Streaming session started');
+    }
+    return streamingActive;
+  } catch (err) {
+    logError('[MLX-Server] Failed to start streaming session:', err);
+    return false;
+  }
+}
+
+export async function sendStreamChunk(chunk: Buffer): Promise<void> {
+  if (!streamingActive || !serverReady) return;
+  try {
+    await httpPost('/stream/chunk', chunk, { 'Content-Type': 'application/octet-stream' });
+  } catch (err) {
+    // Non-fatal: a dropped chunk won't break the session
+    logError('[MLX-Server] Failed to send stream chunk:', err);
+  }
+}
+
+export async function finishStreamingSession(): Promise<string> {
+  if (!streamingActive) {
+    throw new Error('No active streaming session');
+  }
+  streamingActive = false;
+
+  if (!serverReady) {
+    throw new Error('MLX server is not running.');
+  }
+
+  const result = await httpPost('/stream/finish', Buffer.alloc(0), {});
+
+  if (result.error) {
+    throw new Error(`MLX streaming transcription failed: ${result.error}`);
+  }
+
+  log('[MLX-Server] Streaming transcription complete');
+  return result.text || '';
+}
+
+export function isStreamingActive(): boolean {
+  return streamingActive;
+}
+
+// --- Legacy batch API (fallback) ---
+
 export async function transcribeViaServer(audioBuffer: Buffer, modelName: string): Promise<string> {
   if (!serverReady) {
-    // Try to restart the server before giving up
     log('[MLX-Server] Server not ready, attempting restart before transcription...');
     const ok = await startMLXServer();
     if (!ok) {

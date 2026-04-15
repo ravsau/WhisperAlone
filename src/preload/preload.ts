@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld('api', {
   sendAudioData: (data: number[]) => {
     ipcRenderer.send('audio-data', data);
   },
+  sendAudioChunk: (data: number[]) => {
+    ipcRenderer.send('audio-chunk', data);
+  },
   sendRecordingError: (message: string) => {
     ipcRenderer.send('recording-error', message);
   },

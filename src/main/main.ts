@@ -18,7 +18,10 @@ import { transcribeAudio } from './transcriber';
 import { injectText } from './injector';
 import { addHistoryEntry, getHistory, getSettings, setSettings } from './store';
 import { log, logError } from './logger';
-import { startMLXServer, stopMLXServer, isMLXServerRunning, isFirstBoot, setServerCrashHandler } from './mlx-server';
+import {
+  startMLXServer, stopMLXServer, isMLXServerRunning, isFirstBoot, setServerCrashHandler,
+  startStreamingSession, sendStreamChunk, finishStreamingSession, isStreamingActive,
+} from './mlx-server';
 
 import os from 'os';
 
@@ -352,10 +355,20 @@ function checkPermissions(): void {
 function setupHotkey(): void {
   hotkey = new HotkeyManager();
 
-  hotkey.on('recording-start', () => {
+  hotkey.on('recording-start', async () => {
     log('[WhisperAlone] Recording started');
     setTrayRecording(true);
     showOverlay();
+
+    // Start streaming session so audio chunks are forwarded to the server in real-time
+    const settings = getSettings();
+    if (settings.backend === 'mlx' && isMLXServerRunning()) {
+      const ok = await startStreamingSession(settings.mlxModel);
+      if (ok) {
+        log('[WhisperAlone] Streaming session started — chunks will be forwarded');
+      }
+    }
+
     audioWindow?.webContents.send('start-recording');
   });
 
@@ -370,19 +383,34 @@ function setupHotkey(): void {
 }
 
 function setupIPC(): void {
+  // Forward audio chunks to the MLX streaming server in real-time
+  ipcMain.on('audio-chunk', (_event, data: number[]) => {
+    if (isStreamingActive()) {
+      const chunk = Buffer.from(new Uint8Array(data));
+      sendStreamChunk(chunk);
+    }
+  });
+
   ipcMain.on('audio-data', async (_event, data: number[]) => {
     log(`[WhisperAlone] Received audio-data IPC, data length: ${data?.length ?? 'null'}`);
     try {
       const buffer = Buffer.from(new Uint8Array(data));
+      const settings = getSettings();
+      let text: string;
 
-      if (buffer.length < 2000) {
+      // If streaming session is active and we got empty data, finish via streaming
+      if (isStreamingActive() && buffer.length === 0) {
+        log('[WhisperAlone] Finishing streaming transcription...');
+        text = await finishStreamingSession();
+      } else if (buffer.length < 2000) {
         log(`[WhisperAlone] Recording too short (${buffer.length} bytes), skipping`);
         hotkey?.setIdle();
         return;
+      } else {
+        // Fallback: batch transcription
+        log(`[WhisperAlone] Transcribing ${buffer.length} bytes (batch)...`);
+        text = await transcribeAudio(buffer);
       }
-
-      log(`[WhisperAlone] Transcribing ${buffer.length} bytes...`);
-      const text = await transcribeAudio(buffer);
 
       if (text && text.length > 0) {
         log(`[WhisperAlone] Transcribed: "${text}"`);

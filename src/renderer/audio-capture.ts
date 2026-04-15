@@ -5,6 +5,7 @@ let audioChunks: Blob[] = [];
 let currentStream: MediaStream | null = null;
 let recorderActive = false;
 let stopRequested = false;
+let chunksSentToStream = 0;
 
 // VAD state — track which chunks contain speech so we can trim silence
 let analyser: AnalyserNode | null = null;
@@ -22,7 +23,6 @@ function checkVAD(): void {
   const data = new Float32Array(analyser.fftSize);
   analyser.getFloatTimeDomainData(data);
 
-  // Compute RMS
   let sum = 0;
   for (let i = 0; i < data.length; i++) {
     sum += data[i] * data[i];
@@ -31,7 +31,6 @@ function checkVAD(): void {
 
   if (rms > VAD_RMS_THRESHOLD) {
     if (!speechDetected) {
-      // Mark the first chunk with speech (use current chunk count minus 1 for a small buffer)
       firstSpeechChunkIndex = Math.max(0, audioChunks.length - 1);
       speechDetected = true;
       console.log('[AudioCapture] VAD: speech start at chunk', firstSpeechChunkIndex);
@@ -66,9 +65,16 @@ function stopVAD(): void {
   analyser = null;
 }
 
+async function sendChunkToStream(blob: Blob): Promise<void> {
+  const arrayBuffer = await blob.arrayBuffer();
+  window.api.sendAudioChunk(Array.from(new Uint8Array(arrayBuffer)));
+  chunksSentToStream++;
+}
+
 window.api.onStartRecording(async () => {
   console.log('[AudioCapture] Start recording requested');
   stopRequested = false;
+  chunksSentToStream = 0;
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -78,7 +84,6 @@ window.api.onStartRecording(async () => {
       },
     });
 
-    // If stop was requested while we were awaiting the mic, abort immediately
     if (stopRequested) {
       console.log('[AudioCapture] Stop was requested during mic init, sending empty');
       stream.getTracks().forEach((track) => track.stop());
@@ -90,7 +95,6 @@ window.api.onStartRecording(async () => {
     currentStream = stream;
     audioChunks = [];
 
-    // Start VAD analysis on the raw stream
     startVAD(stream);
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -103,6 +107,8 @@ window.api.onStartRecording(async () => {
     mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
         audioChunks.push(event.data);
+        // Stream every chunk to the server in real-time (including the webm header in chunk 0)
+        sendChunkToStream(event.data);
       }
     };
 
@@ -110,10 +116,21 @@ window.api.onStartRecording(async () => {
       recorderActive = false;
       stopVAD();
 
-      // Trim silent chunks from start and end
+      if (chunksSentToStream > 0) {
+        // Streaming mode: all chunks already sent to server.
+        // Send empty audio-data to signal main process to call /stream/finish.
+        console.log(`[AudioCapture] Streamed ${chunksSentToStream} chunks, signaling finish`);
+        window.api.sendAudioData([]);
+        if (currentStream) {
+          currentStream.getTracks().forEach((track) => track.stop());
+          currentStream = null;
+        }
+        return;
+      }
+
+      // Fallback: batch mode with VAD trimming (if streaming wasn't active)
       let trimmedChunks = audioChunks;
       if (speechDetected && audioChunks.length > 0) {
-        // Keep one extra chunk before/after speech for safety
         const start = Math.max(0, firstSpeechChunkIndex - 1);
         const end = Math.min(audioChunks.length, lastSpeechChunkIndex + 2);
         trimmedChunks = audioChunks.slice(start, end);
@@ -131,7 +148,6 @@ window.api.onStartRecording(async () => {
       console.log('[AudioCapture] Sending', arrayBuffer.byteLength, 'bytes to main');
       window.api.sendAudioData(Array.from(new Uint8Array(arrayBuffer)));
 
-      // Release microphone
       if (currentStream) {
         currentStream.getTracks().forEach((track) => track.stop());
         currentStream = null;
@@ -154,8 +170,6 @@ window.api.onStopRecording(() => {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
   } else if (!recorderActive) {
-    // MediaRecorder hasn't started yet — the onstop handler won't fire
-    // Send empty data so main process doesn't hang
     console.log('[AudioCapture] Recorder not active, sending empty data');
     window.api.sendAudioData([]);
   }

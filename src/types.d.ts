@@ -15,6 +15,7 @@ interface WhisperAloneAPI {
   onStartRecording: (callback: () => void) => void;
   onStopRecording: (callback: () => void) => void;
   sendAudioData: (data: number[]) => void;
+  sendAudioChunk: (data: number[]) => void;
   sendRecordingError: (message: string) => void;
 
   // History
