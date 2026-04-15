@@ -35,7 +35,7 @@ dotenv.config({ path: path.join(os.homedir(), '.env') });
 let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
 let audioWindow: BrowserWindow | null = null;
-let overlayWindows: BrowserWindow[] = [];
+let overlayWindows: Array<{ displayId: number; window: BrowserWindow }> = [];
 let setupWindow: BrowserWindow | null = null;
 let hotkey: HotkeyManager | null = null;
 
@@ -325,79 +325,122 @@ function createAudioWindow(): void {
 const OVERLAY_WIDTH = 280;
 const OVERLAY_HEIGHT = 56;
 
-function createOverlayForDisplay(display: Electron.Display): BrowserWindow {
-  const { x: sx, y: sy } = display.workArea;
-  const { width: sw, height: sh } = display.workAreaSize;
-
-  const win = new BrowserWindow({
+function getOverlayBounds(display: Electron.Display): Electron.Rectangle {
+  const { x, y, width, height } = display.workArea;
+  return {
+    x: Math.round(x + (width - OVERLAY_WIDTH) / 2),
+    y: Math.round(y + height - OVERLAY_HEIGHT - 40),
     width: OVERLAY_WIDTH,
     height: OVERLAY_HEIGHT,
-    x: Math.round(sx + (sw - OVERLAY_WIDTH) / 2),
-    y: Math.round(sy + sh - OVERLAY_HEIGHT - 40),
+  };
+}
+
+function positionOverlayWindow(win: BrowserWindow, display: Electron.Display): void {
+  win.setBounds(getOverlayBounds(display), false);
+}
+
+function createOverlayForDisplay(display: Electron.Display): BrowserWindow {
+  const win = new BrowserWindow({
+    ...getOverlayBounds(display),
     show: false,
     frame: false,
     transparent: true,
-    alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
     movable: false,
     focusable: false,
+    fullscreenable: false,
     hasShadow: false,
     webPreferences: defaultWebPreferences(),
   });
 
   win.setIgnoreMouseEvents(true);
-  win.setVisibleOnAllWorkspaces(true);
+  win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'floating');
+  win.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+  });
+  if (process.platform === 'darwin') {
+    win.setHiddenInMissionControl(true);
+  }
   win.loadFile(rendererPath('overlay.html'));
   return win;
 }
 
 function createOverlayWindows(): void {
   // Close any existing overlays
-  for (const win of overlayWindows) {
-    if (!win.isDestroyed()) win.close();
+  for (const { window } of overlayWindows) {
+    if (!window.isDestroyed()) window.close();
   }
   overlayWindows = [];
 
   // Create one overlay per display
   const displays = screen.getAllDisplays();
   for (const display of displays) {
-    overlayWindows.push(createOverlayForDisplay(display));
+    overlayWindows.push({
+      displayId: display.id,
+      window: createOverlayForDisplay(display),
+    });
   }
-  log(`[Main] Created ${overlayWindows.length} overlay(s) for ${displays.length} display(s)`);
+  const displaySummary = displays
+    .map(({ id, bounds, workArea }) => `${id}: bounds=${bounds.width}x${bounds.height}@${bounds.x},${bounds.y} workArea=${workArea.width}x${workArea.height}@${workArea.x},${workArea.y}`)
+    .join(' | ');
+  log(`[Main] Created ${overlayWindows.length} overlay(s) for ${displays.length} display(s)${displaySummary ? ` [${displaySummary}]` : ''}`);
 }
 
-function showOverlay(): void {
-  // Recreate overlays if display count changed (monitor plugged/unplugged)
-  const displayCount = screen.getAllDisplays().length;
-  if (overlayWindows.length !== displayCount) {
+function syncOverlayWindows(): void {
+  const displays = screen.getAllDisplays();
+  const displayIds = new Set(displays.map((display) => display.id));
+  const needsRecreate =
+    overlayWindows.length !== displays.length ||
+    overlayWindows.some(({ displayId, window }) => window.isDestroyed() || !displayIds.has(displayId));
+
+  if (needsRecreate) {
     createOverlayWindows();
   }
 
-  for (const win of overlayWindows) {
-    if (!win.isDestroyed()) {
-      win.webContents.send('start-recording');
-      win.showInactive();
+  const displayMap = new Map(screen.getAllDisplays().map((display) => [display.id, display]));
+  for (const { displayId, window } of overlayWindows) {
+    if (!window.isDestroyed()) {
+      const display = displayMap.get(displayId);
+      if (display) {
+        positionOverlayWindow(window, display);
+        window.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'floating');
+      }
+    }
+  }
+}
+
+function showOverlay(): void {
+  syncOverlayWindows();
+
+  for (const { window } of overlayWindows) {
+    if (!window.isDestroyed()) {
+      if (!window.webContents.isLoadingMainFrame()) {
+        window.webContents.send('start-recording');
+      }
+      window.show();
     }
   }
 }
 
 function hideOverlay(): void {
-  for (const win of overlayWindows) {
-    if (!win.isDestroyed()) {
-      win.webContents.send('stop-recording');
+  for (const { window } of overlayWindows) {
+    if (!window.isDestroyed()) {
+      if (!window.webContents.isLoadingMainFrame()) {
+        window.webContents.send('stop-recording');
+      }
     }
   }
   setTimeout(() => {
-    for (const win of overlayWindows) {
-      if (!win.isDestroyed()) win.hide();
+    for (const { window } of overlayWindows) {
+      if (!window.isDestroyed()) window.hide();
     }
   }, 500);
 }
 
 function hideOverlayNow(): void {
-  for (const win of overlayWindows) {
-    if (!win.isDestroyed()) win.hide();
+  for (const { window } of overlayWindows) {
+    if (!window.isDestroyed()) window.hide();
   }
 }
 
@@ -594,6 +637,9 @@ app.whenReady().then(async () => {
   createMainWindow();
   createAudioWindow();
   createOverlayWindows();
+  screen.on('display-added', () => createOverlayWindows());
+  screen.on('display-removed', () => createOverlayWindows());
+  screen.on('display-metrics-changed', () => createOverlayWindows());
   checkPermissions();
   setupIPC();
   setupHotkey();
@@ -628,8 +674,8 @@ app.on('before-quit', async () => {
   mainWindow?.removeAllListeners('close');
   mainWindow?.close();
   audioWindow?.close();
-  for (const win of overlayWindows) {
-    if (!win.isDestroyed()) win.close();
+  for (const { window } of overlayWindows) {
+    if (!window.isDestroyed()) window.close();
   }
   setupWindow?.close();
 });
