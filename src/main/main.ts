@@ -108,7 +108,9 @@ async function startMLXWithProgress(): Promise<void> {
 
 // --- Tray ---
 
-function pasteApiKeyFromClipboard(): void {
+let apiKeyWindow: BrowserWindow | null = null;
+
+function showApiKeyPrompt(): void {
   const settings = getSettings();
 
   if (settings.openaiApiKey) {
@@ -116,7 +118,7 @@ function pasteApiKeyFromClipboard(): void {
       type: 'question',
       title: 'OpenAI API Key',
       message: 'A key is already saved.',
-      buttons: ['Replace from Clipboard', 'Remove Key', 'Cancel'],
+      buttons: ['Enter New Key', 'Remove Key', 'Cancel'],
     });
     if (btn === 1) {
       setSettings({ openaiApiKey: '', backend: 'mlx' });
@@ -128,33 +130,84 @@ function pasteApiKeyFromClipboard(): void {
     if (btn !== 0) return;
   }
 
-  const key = clipboard.readText().trim();
-
-  if (!key) {
-    dialog.showMessageBoxSync({
-      type: 'info',
-      title: 'Paste API Key',
-      message: 'Copy your OpenAI key, then click this again.',
-      detail: '1. Go to platform.openai.com/api-keys\n2. Copy your key\n3. Click "Paste API Key" again',
-    });
+  if (apiKeyWindow && !apiKeyWindow.isDestroyed()) {
+    apiKeyWindow.focus();
     return;
   }
 
-  if (!key.startsWith('sk-')) {
-    dialog.showMessageBoxSync({
-      type: 'error',
-      title: 'Invalid Key',
-      message: 'Clipboard doesn\'t contain an OpenAI key.',
-      detail: 'Expected a key starting with "sk-".',
-    });
-    return;
-  }
+  const display = screen.getPrimaryDisplay();
+  const { width: sw, height: sh } = display.workAreaSize;
+  const winW = 420;
+  const winH = 160;
 
-  setSettings({ openaiApiKey: key });
-  process.env.OPENAI_API_KEY = key;
-  rebuildTrayMenu();
-  log('[Settings] OpenAI API key saved from clipboard');
-  new Notification({ title: 'WhisperAlone', body: 'API key saved! OpenAI Cloud is now available.' }).show();
+  apiKeyWindow = new BrowserWindow({
+    width: winW,
+    height: winH,
+    x: Math.round((sw - winW) / 2),
+    y: Math.round((sh - winH) / 2),
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    alwaysOnTop: true,
+    title: 'Enter OpenAI API Key',
+    webPreferences: { nodeIntegration: false, contextIsolation: true, preload: preloadPath() },
+  });
+
+  apiKeyWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: -apple-system, sans-serif; padding: 20px; background: #1e1e1e; color: #e0e0e0; }
+  input { width: 100%; padding: 10px; font-size: 14px; border: 1px solid #555; border-radius: 6px;
+    background: #2d2d2d; color: #e0e0e0; box-sizing: border-box; margin-bottom: 12px; }
+  input:focus { outline: none; border-color: #007aff; }
+  .buttons { display: flex; gap: 8px; justify-content: flex-end; }
+  button { padding: 8px 20px; border-radius: 6px; border: none; font-size: 14px; cursor: pointer; }
+  .save { background: #007aff; color: white; }
+  .cancel { background: #3a3a3a; color: #e0e0e0; }
+  .error { color: #ff6b6b; font-size: 12px; margin-bottom: 8px; display: none; }
+</style>
+</head>
+<body>
+  <input id="key" type="password" placeholder="sk-..." autofocus />
+  <div class="error" id="err">Key must start with "sk-"</div>
+  <div class="buttons">
+    <button class="cancel" onclick="window.close()">Cancel</button>
+    <button class="save" id="save">Save</button>
+  </div>
+  <script>
+    const input = document.getElementById('key');
+    const err = document.getElementById('err');
+    document.getElementById('save').onclick = () => {
+      const val = input.value.trim();
+      if (!val.startsWith('sk-')) { err.style.display = 'block'; return; }
+      // Post the key back via title change (no IPC needed for this simple case)
+      document.title = 'APIKEY:' + val;
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') document.getElementById('save').click();
+      if (e.key === 'Escape') window.close();
+    });
+  </script>
+</body>
+</html>
+  `)}`);
+
+  apiKeyWindow.webContents.on('page-title-updated', (_event, title) => {
+    if (title.startsWith('APIKEY:')) {
+      const key = title.slice(7);
+      setSettings({ openaiApiKey: key });
+      process.env.OPENAI_API_KEY = key;
+      rebuildTrayMenu();
+      log('[Settings] OpenAI API key saved');
+      new Notification({ title: 'WhisperAlone', body: 'API key saved! OpenAI Cloud is now available.' }).show();
+      apiKeyWindow?.close();
+      apiKeyWindow = null;
+    }
+  });
+
+  apiKeyWindow.on('closed', () => { apiKeyWindow = null; });
 }
 
 function buildTrayMenu(): Menu {
@@ -200,7 +253,7 @@ function buildTrayMenu(): Menu {
     { type: 'separator' as const },
     {
       label: hasApiKey ? 'Change API Key...' : 'Paste API Key  (for OpenAI)',
-      click: () => pasteApiKeyFromClipboard(),
+      click: () => showApiKeyPrompt(),
     },
     { label: 'Show History', click: () => showMainWindow() },
     { type: 'separator' as const },

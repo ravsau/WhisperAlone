@@ -1,5 +1,6 @@
-import { clipboard } from 'electron';
+import { clipboard, systemPreferences } from 'electron';
 import { execSync } from 'child_process';
+import { log, logError } from './logger';
 
 const PASTE_DELAY_MS = 150;
 const RESTORE_DELAY_MS = 800;
@@ -23,21 +24,29 @@ $.CGEventPost($.kCGSessionEventTap, keyUp);
 `;
 
 export async function injectText(text: string): Promise<void> {
+  // Check accessibility permission
+  const isTrusted = systemPreferences.isTrustedAccessibilityClient(false);
+  if (!isTrusted) {
+    logError('[Injector] Accessibility permission not granted — cannot paste');
+    return;
+  }
+
   // Save current clipboard
   const previousText = clipboard.readText();
   const previousImage = clipboard.readImage();
 
   // Write transcription to clipboard
   clipboard.writeText(text);
+  log(`[Injector] Clipboard set, pasting ${text.length} chars...`);
 
   await delay(PASTE_DELAY_MS);
 
   try {
     execSync(`osascript -l JavaScript -e '${JXA_PASTE_SCRIPT}'`, { timeout: 5000 });
-    console.log('[Injector] Pasted via JXA CGEvent');
+    log('[Injector] Pasted via JXA CGEvent');
   } catch (err) {
-    console.error('[Injector] Paste failed:', (err as Error).message);
-    console.log('[Injector] Text is on clipboard — manually Cmd+V');
+    logError('[Injector] Paste failed:', err);
+    log('[Injector] Text is on clipboard — manually Cmd+V');
     return;
   }
 
