@@ -23,7 +23,7 @@ import {
   startStreamingSession, sendStreamChunk, finishStreamingSession, isStreamingActive,
 } from './mlx-server';
 import {
-  routeTranscription, exportTodayHistory, generateDailyDigest,
+  routeTranscription, exportTodayHistory, exportAllHistory, generateDailyDigest,
   isMLXLLMAvailable, openNotesFolder,
 } from './voice-router';
 
@@ -38,6 +38,9 @@ let audioWindow: BrowserWindow | null = null;
 let overlayWindows: Array<{ displayId: number; window: BrowserWindow }> = [];
 let setupWindow: BrowserWindow | null = null;
 let hotkey: HotkeyManager | null = null;
+let overlayState: 'hidden' | 'recording' | 'processing' = 'hidden';
+let overlayHideTimeout: NodeJS.Timeout | null = null;
+let overlaySyncTimeout: NodeJS.Timeout | null = null;
 
 // Resolve asset path (works in both dev and packaged app)
 function assetPath(filename: string): string {
@@ -273,6 +276,17 @@ function buildTrayMenu(): Menu {
       },
     },
     {
+      label: 'Export All Transcripts...',
+      click: () => {
+        const file = exportAllHistory();
+        if (file) {
+          new Notification({ title: 'WhisperAlone', body: `Exported ${file}` }).show();
+        } else {
+          new Notification({ title: 'WhisperAlone', body: 'No transcription history.' }).show();
+        }
+      },
+    },
+    {
       label: 'Summarize My Day',
       click: async () => {
         if (!isMLXLLMAvailable()) {
@@ -374,21 +388,51 @@ function createAudioWindow(): void {
 
 // --- Overlay ---
 
-const OVERLAY_WIDTH = 280;
-const OVERLAY_HEIGHT = 56;
+const OVERLAY_STRIP_HEIGHT = 120;
 
 function getOverlayBounds(display: Electron.Display): Electron.Rectangle {
   const { x, y, width, height } = display.workArea;
   return {
-    x: Math.round(x + (width - OVERLAY_WIDTH) / 2),
-    y: Math.round(y + height - OVERLAY_HEIGHT - 40),
-    width: OVERLAY_WIDTH,
-    height: OVERLAY_HEIGHT,
+    x,
+    y: Math.round(y + height - OVERLAY_STRIP_HEIGHT),
+    width,
+    height: Math.min(OVERLAY_STRIP_HEIGHT, height),
   };
 }
 
 function positionOverlayWindow(win: BrowserWindow, display: Electron.Display): void {
   win.setBounds(getOverlayBounds(display), false);
+}
+
+function clearOverlayHideTimeout(): void {
+  if (overlayHideTimeout) {
+    clearTimeout(overlayHideTimeout);
+    overlayHideTimeout = null;
+  }
+}
+
+function applyOverlayStateToWindow(win: BrowserWindow): void {
+  if (win.isDestroyed()) return;
+
+  if (overlayState === 'hidden') {
+    win.hide();
+    return;
+  }
+
+  if (!win.webContents.isLoadingMainFrame()) {
+    win.webContents.send(
+      overlayState === 'recording' ? 'start-recording' : 'stop-recording',
+    );
+  }
+
+  win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'floating');
+  win.showInactive();
+}
+
+function applyOverlayStateToAllWindows(): void {
+  for (const { window } of overlayWindows) {
+    applyOverlayStateToWindow(window);
+  }
 }
 
 function createOverlayForDisplay(display: Electron.Display): BrowserWindow {
@@ -397,12 +441,14 @@ function createOverlayForDisplay(display: Electron.Display): BrowserWindow {
     show: false,
     frame: false,
     transparent: true,
+    backgroundColor: '#00000000',
     skipTaskbar: true,
     resizable: false,
     movable: false,
     focusable: false,
     fullscreenable: false,
     hasShadow: false,
+    paintWhenInitiallyHidden: true,
     webPreferences: defaultWebPreferences(),
   });
 
@@ -415,6 +461,9 @@ function createOverlayForDisplay(display: Electron.Display): BrowserWindow {
     win.setHiddenInMissionControl(true);
   }
   win.loadFile(rendererPath('overlay.html'));
+  win.webContents.on('did-finish-load', () => {
+    applyOverlayStateToWindow(win);
+  });
   return win;
 }
 
@@ -441,59 +490,94 @@ function createOverlayWindows(): void {
 
 function syncOverlayWindows(): void {
   const displays = screen.getAllDisplays();
-  const displayIds = new Set(displays.map((display) => display.id));
-  const needsRecreate =
-    overlayWindows.length !== displays.length ||
-    overlayWindows.some(({ displayId, window }) => window.isDestroyed() || !displayIds.has(displayId));
+  const displayMap = new Map(displays.map((display) => [display.id, display]));
+  const nextOverlayWindows: Array<{ displayId: number; window: BrowserWindow }> = [];
+  const currentWindows = new Map(overlayWindows.map((entry) => [entry.displayId, entry.window]));
 
-  if (needsRecreate) {
-    createOverlayWindows();
+  for (const [displayId, window] of currentWindows) {
+    if (window.isDestroyed()) {
+      currentWindows.delete(displayId);
+    }
   }
 
-  const displayMap = new Map(screen.getAllDisplays().map((display) => [display.id, display]));
-  for (const { displayId, window } of overlayWindows) {
-    if (!window.isDestroyed()) {
-      const display = displayMap.get(displayId);
-      if (display) {
-        positionOverlayWindow(window, display);
-        window.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'floating');
-      }
+  for (const [displayId, window] of currentWindows) {
+    if (!displayMap.has(displayId) && !window.isDestroyed()) {
+      window.close();
+    }
+  }
+
+  for (const display of displays) {
+    const existingWindow = currentWindows.get(display.id);
+    const window = existingWindow && !existingWindow.isDestroyed()
+      ? existingWindow
+      : createOverlayForDisplay(display);
+
+    positionOverlayWindow(window, display);
+    window.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'floating');
+    nextOverlayWindows.push({ displayId: display.id, window });
+  }
+
+  overlayWindows = nextOverlayWindows;
+}
+
+function scheduleOverlaySync(): void {
+  if (overlaySyncTimeout) {
+    clearTimeout(overlaySyncTimeout);
+  }
+
+  overlaySyncTimeout = setTimeout(() => {
+    overlaySyncTimeout = null;
+    syncOverlayWindows();
+    applyOverlayStateToAllWindows();
+  }, 100);
+}
+
+function logOverlayDisplays(): void {
+  const displays = screen.getAllDisplays();
+  const displaySummary = displays
+    .map(({ id, bounds, workArea }) => `${id}: bounds=${bounds.width}x${bounds.height}@${bounds.x},${bounds.y} workArea=${workArea.width}x${workArea.height}@${workArea.x},${workArea.y}`)
+    .join(' | ');
+  log(`[Main] Synced ${overlayWindows.length} overlay(s) across ${displays.length} display(s)${displaySummary ? ` [${displaySummary}]` : ''}`);
+}
+
+function refreshOverlayWindows(): void {
+  const beforeCount = overlayWindows.length;
+  syncOverlayWindows();
+
+  if (overlayWindows.length !== beforeCount) {
+    logOverlayDisplays();
+  } else {
+    const recreated = overlayWindows.some(({ window }) => window.isDestroyed());
+    if (recreated) {
+      logOverlayDisplays();
     }
   }
 }
 
 function showOverlay(): void {
-  syncOverlayWindows();
-
-  for (const { window } of overlayWindows) {
-    if (!window.isDestroyed()) {
-      if (!window.webContents.isLoadingMainFrame()) {
-        window.webContents.send('start-recording');
-      }
-      window.show();
-    }
-  }
+  clearOverlayHideTimeout();
+  overlayState = 'recording';
+  refreshOverlayWindows();
+  applyOverlayStateToAllWindows();
 }
 
 function hideOverlay(): void {
-  for (const { window } of overlayWindows) {
-    if (!window.isDestroyed()) {
-      if (!window.webContents.isLoadingMainFrame()) {
-        window.webContents.send('stop-recording');
-      }
-    }
-  }
-  setTimeout(() => {
-    for (const { window } of overlayWindows) {
-      if (!window.isDestroyed()) window.hide();
-    }
+  clearOverlayHideTimeout();
+  overlayState = 'processing';
+  refreshOverlayWindows();
+  applyOverlayStateToAllWindows();
+  overlayHideTimeout = setTimeout(() => {
+    if (overlayState !== 'processing') return;
+    overlayState = 'hidden';
+    applyOverlayStateToAllWindows();
+    overlayHideTimeout = null;
   }, 500);
 }
 
 function hideOverlayNow(): void {
-  for (const { window } of overlayWindows) {
-    if (!window.isDestroyed()) window.hide();
-  }
+  clearOverlayHideTimeout();
+  overlayState = 'hidden';
+  applyOverlayStateToAllWindows();
 }
 
 // --- Permissions ---
@@ -689,9 +773,9 @@ app.whenReady().then(async () => {
   createMainWindow();
   createAudioWindow();
   createOverlayWindows();
-  screen.on('display-added', () => createOverlayWindows());
-  screen.on('display-removed', () => createOverlayWindows());
-  screen.on('display-metrics-changed', () => createOverlayWindows());
+  screen.on('display-added', () => scheduleOverlaySync());
+  screen.on('display-removed', () => scheduleOverlaySync());
+  screen.on('display-metrics-changed', () => scheduleOverlaySync());
   checkPermissions();
   setupIPC();
   setupHotkey();

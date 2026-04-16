@@ -144,6 +144,38 @@ export function exportTodayHistory(): string | null {
   return file;
 }
 
+export function exportAllHistory(): string | null {
+  const history = getHistory();
+
+  if (history.length === 0) {
+    return null;
+  }
+
+  ensureDir(JOURNAL_DIR);
+  const file = path.join(JOURNAL_DIR, `all-transcripts.md`);
+
+  const lines = [`# WhisperAlone — All Transcripts\n\n`];
+  lines.push(`*${history.length} entries*\n\n---\n\n`);
+
+  let currentDate = '';
+  for (const entry of [...history].reverse()) {
+    const date = new Date(entry.timestamp);
+    const dateStr = date.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+
+    if (dateStr !== currentDate) {
+      currentDate = dateStr;
+      lines.push(`# ${dateStr}\n\n`);
+    }
+
+    lines.push(`**${time}**\n\n${entry.text}\n\n---\n\n`);
+  }
+
+  fs.writeFileSync(file, lines.join(''), 'utf-8');
+  log(`[VoiceRouter] Exported all ${history.length} entries to ${file}`);
+  return file;
+}
+
 // --- Daily Digest via MLX LLM ---
 
 export async function generateDailyDigest(): Promise<string | null> {
