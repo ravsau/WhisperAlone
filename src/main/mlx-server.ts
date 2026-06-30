@@ -50,6 +50,7 @@ let serverProcess: ChildProcess | null = null;
 let serverReady = false;
 let setupInProgress = false;
 let restartInProgress = false;
+let intentionalStopInProgress = false;
 let onServerCrash: (() => void) | null = null;
 
 function isPortInUse(port: number): Promise<boolean> {
@@ -283,7 +284,7 @@ export async function startMLXServer(onProgress?: ProgressCallback): Promise<boo
         clearTimeout(timeout);
         onProgress?.('server', 'error', 'Server stopped unexpectedly');
         resolve(false);
-      } else if (wasReady) {
+      } else if (wasReady && !intentionalStopInProgress) {
         // Server crashed after it was running — auto-restart
         log('[MLX-Server] Server crashed, scheduling auto-restart...');
         scheduleRestart();
@@ -305,10 +306,13 @@ export async function startMLXServer(onProgress?: ProgressCallback): Promise<boo
 }
 
 export async function stopMLXServer(): Promise<void> {
+  intentionalStopInProgress = true;
+
   if (!serverProcess) {
     serverReady = false;
     // Kill any orphaned process on our port
     await killProcessOnPort();
+    intentionalStopInProgress = false;
     return;
   }
 
@@ -348,6 +352,7 @@ export async function stopMLXServer(): Promise<void> {
   await waitForPortFree(MLX_SERVER_PORT, 5000);
 
   log('[MLX-Server] Stopped');
+  intentionalStopInProgress = false;
 }
 
 export function isMLXServerRunning(): boolean {
@@ -359,6 +364,7 @@ export function setServerCrashHandler(handler: () => void): void {
 }
 
 function scheduleRestart(): void {
+  if (intentionalStopInProgress) return;
   if (restartInProgress) return;
   restartInProgress = true;
   setTimeout(async () => {

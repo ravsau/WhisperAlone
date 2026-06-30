@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+type AudioDataPayload = number[] | {
+  bytes: number[];
+  durationMs?: number;
+  audioSizeBytes?: number;
+};
+
 contextBridge.exposeInMainWorld('api', {
   // Audio capture window APIs
   onStartRecording: (callback: () => void) => {
@@ -8,8 +14,8 @@ contextBridge.exposeInMainWorld('api', {
   onStopRecording: (callback: () => void) => {
     ipcRenderer.on('stop-recording', () => callback());
   },
-  sendAudioData: (data: number[]) => {
-    ipcRenderer.send('audio-data', data);
+  sendAudioData: (payload: AudioDataPayload) => {
+    ipcRenderer.send('audio-data', payload);
   },
   sendAudioChunk: (data: number[]) => {
     ipcRenderer.send('audio-chunk', data);
@@ -23,6 +29,10 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('history-update', (_event, entries) => callback(entries));
   },
   getHistory: () => ipcRenderer.invoke('get-history'),
+  onUsageStatsUpdate: (callback: (stats: any) => void) => {
+    ipcRenderer.on('usage-stats-update', (_event, stats) => callback(stats));
+  },
+  getUsageStats: () => ipcRenderer.invoke('get-usage-stats'),
 
   // Settings APIs
   getSettings: () => ipcRenderer.invoke('get-settings'),

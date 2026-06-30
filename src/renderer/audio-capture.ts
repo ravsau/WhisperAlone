@@ -6,6 +6,8 @@ let currentStream: MediaStream | null = null;
 let recorderActive = false;
 let stopRequested = false;
 let chunksSentToStream = 0;
+let recordingStartedAt = 0;
+let recordingAudioSizeBytes = 0;
 
 // VAD state — track which chunks contain speech so we can trim silence
 let analyser: AnalyserNode | null = null;
@@ -17,6 +19,19 @@ let lastSpeechChunkIndex = 0;
 
 const VAD_RMS_THRESHOLD = 0.015; // minimum RMS to count as speech
 const VAD_CHECK_INTERVAL_MS = 50;
+
+function currentRecordingDurationMs(): number | undefined {
+  if (recordingStartedAt <= 0) return undefined;
+  return Math.max(0, Math.round(performance.now() - recordingStartedAt));
+}
+
+function sendFinalAudioData(bytes: number[], audioSizeBytes = bytes.length): void {
+  window.api.sendAudioData({
+    bytes,
+    durationMs: currentRecordingDurationMs(),
+    audioSizeBytes,
+  });
+}
 
 function checkVAD(): void {
   if (!analyser) return;
@@ -75,6 +90,8 @@ window.api.onStartRecording(async () => {
   console.log('[AudioCapture] Start recording requested');
   stopRequested = false;
   chunksSentToStream = 0;
+  recordingStartedAt = 0;
+  recordingAudioSizeBytes = 0;
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -87,7 +104,7 @@ window.api.onStartRecording(async () => {
     if (stopRequested) {
       console.log('[AudioCapture] Stop was requested during mic init, sending empty');
       stream.getTracks().forEach((track) => track.stop());
-      window.api.sendAudioData([]);
+      sendFinalAudioData([]);
       return;
     }
 
@@ -107,6 +124,7 @@ window.api.onStartRecording(async () => {
     mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
         audioChunks.push(event.data);
+        recordingAudioSizeBytes += event.data.size;
         // Stream every chunk to the server in real-time (including the webm header in chunk 0)
         sendChunkToStream(event.data);
       }
@@ -120,7 +138,7 @@ window.api.onStartRecording(async () => {
         // Streaming mode: all chunks already sent to server.
         // Send empty audio-data to signal main process to call /stream/finish.
         console.log(`[AudioCapture] Streamed ${chunksSentToStream} chunks, signaling finish`);
-        window.api.sendAudioData([]);
+        sendFinalAudioData([], recordingAudioSizeBytes);
         if (currentStream) {
           currentStream.getTracks().forEach((track) => track.stop());
           currentStream = null;
@@ -146,7 +164,7 @@ window.api.onStartRecording(async () => {
       const audioBlob = new Blob(trimmedChunks, { type: 'audio/webm' });
       const arrayBuffer = await audioBlob.arrayBuffer();
       console.log('[AudioCapture] Sending', arrayBuffer.byteLength, 'bytes to main');
-      window.api.sendAudioData(Array.from(new Uint8Array(arrayBuffer)));
+      sendFinalAudioData(Array.from(new Uint8Array(arrayBuffer)), arrayBuffer.byteLength);
 
       if (currentStream) {
         currentStream.getTracks().forEach((track) => track.stop());
@@ -156,6 +174,7 @@ window.api.onStartRecording(async () => {
 
     mediaRecorder.start(100);
     recorderActive = true;
+    recordingStartedAt = performance.now();
     console.log('[AudioCapture] Recording started');
   } catch (err) {
     console.error('[AudioCapture] Error:', err);
@@ -171,6 +190,6 @@ window.api.onStopRecording(() => {
     mediaRecorder.stop();
   } else if (!recorderActive) {
     console.log('[AudioCapture] Recorder not active, sending empty data');
-    window.api.sendAudioData([]);
+    sendFinalAudioData([]);
   }
 });

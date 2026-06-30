@@ -10,13 +10,15 @@ import {
   Notification,
   screen,
   clipboard,
+  globalShortcut,
+  shell,
 } from 'electron';
 import path from 'path';
 import dotenv from 'dotenv';
-import { HotkeyManager } from './hotkey';
+import { HotkeyManager, type AppState } from './hotkey';
 import { transcribeAudio } from './transcriber';
 import { injectText } from './injector';
-import { addHistoryEntry, getHistory, getSettings, setSettings } from './store';
+import { addHistoryEntry, getHistory, getSettings, getUsageStats, setSettings } from './store';
 import { log, logError } from './logger';
 import {
   startMLXServer, stopMLXServer, isMLXServerRunning, isFirstBoot, setServerCrashHandler,
@@ -39,8 +41,21 @@ let overlayWindows: Array<{ displayId: number; window: BrowserWindow }> = [];
 let setupWindow: BrowserWindow | null = null;
 let hotkey: HotkeyManager | null = null;
 let overlayState: 'hidden' | 'recording' | 'processing' = 'hidden';
+let activeOverlayDisplayId: number | null = null;
 let overlayHideTimeout: NodeJS.Timeout | null = null;
 let overlaySyncTimeout: NodeJS.Timeout | null = null;
+let hotkeyPermissionRetryInterval: NodeJS.Timeout | null = null;
+let hotkeyPermissionWarningShown = false;
+let fallbackAudioChunks: Buffer[] = [];
+let recordingState: AppState = 'IDLE';
+
+const FALLBACK_RECORDING_ACCELERATOR = 'CommandOrControl+Shift+Space';
+
+type AudioDataPayload = number[] | {
+  bytes?: number[];
+  durationMs?: number;
+  audioSizeBytes?: number;
+};
 
 // Resolve asset path (works in both dev and packaged app)
 function assetPath(filename: string): string {
@@ -217,6 +232,7 @@ function buildTrayMenu(): Menu {
   const settings = getSettings();
   const mlxRunning = isMLXServerRunning();
   const hasApiKey = !!(settings.openaiApiKey || process.env.OPENAI_API_KEY);
+  const accessibilityTrusted = systemPreferences.isTrustedAccessibilityClient(false);
 
   // Show transient status only when server is loading
   const statusItems = (settings.backend === 'mlx' && !mlxRunning)
@@ -258,7 +274,23 @@ function buildTrayMenu(): Menu {
       label: hasApiKey ? 'Change API Key...' : 'Paste API Key  (for OpenAI)',
       click: () => showApiKeyPrompt(),
     },
-    { label: 'Show History', click: () => showMainWindow() },
+    { label: 'Show Dashboard', click: () => showMainWindow() },
+    {
+      label: recordingState === 'RECORDING' ? 'Stop Dictation' : 'Start Dictation',
+      accelerator: FALLBACK_RECORDING_ACCELERATOR,
+      enabled: recordingState !== 'PROCESSING',
+      click: () => toggleRecording('tray'),
+    },
+    {
+      label: hotkey ? 'Double-tap Command: Enabled' : 'Enable Double-tap Command...',
+      enabled: !hotkey,
+      click: () => promptForAccessibility(),
+    },
+    {
+      label: accessibilityTrusted ? 'Accessibility: Granted' : 'Accessibility: Needs Re-add',
+      enabled: !accessibilityTrusted,
+      click: () => promptForAccessibility(),
+    },
     { type: 'separator' as const },
     {
       label: 'Voice Modes: say "journal:", "todo:", or "note:"',
@@ -337,34 +369,61 @@ function setTrayRecording(isRecording: boolean): void {
 // --- Windows ---
 
 function createMainWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 400,
-    height: 600,
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 820,
+    minWidth: 900,
+    minHeight: 680,
     show: false,
     titleBarStyle: 'hiddenInset',
     vibrancy: 'under-window',
     backgroundColor: '#00000000',
     webPreferences: defaultWebPreferences(),
   });
+  mainWindow = win;
 
-  mainWindow.loadFile(rendererPath('index.html'));
+  win.loadFile(rendererPath('index.html'));
 
-  mainWindow.on('close', (e) => {
+  win.on('close', (e) => {
     e.preventDefault();
-    mainWindow?.hide();
+    if (!win.isDestroyed()) {
+      win.hide();
+    }
     // Hide dock icon when no windows are visible (back to tray-only)
     app.dock?.hide();
+  });
+
+  win.on('closed', () => {
+    if (mainWindow === win) {
+      mainWindow = null;
+    }
   });
 }
 
 function showMainWindow(): void {
-  if (!mainWindow) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
     createMainWindow();
   }
   // Show dock icon so the app menu bar appears
   app.dock?.show();
-  mainWindow?.show();
-  mainWindow?.focus();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
+function sendMainWindow(channel: string, data: unknown): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send(channel, data);
+}
+
+function initializePersistentData(): void {
+  getHistory();
+  getUsageStats();
 }
 
 function createAudioWindow(): void {
@@ -430,7 +489,14 @@ function applyOverlayStateToWindow(win: BrowserWindow): void {
 }
 
 function applyOverlayStateToAllWindows(): void {
-  for (const { window } of overlayWindows) {
+  for (const { displayId, window } of overlayWindows) {
+    if (overlayState !== 'hidden' && activeOverlayDisplayId !== null && displayId !== activeOverlayDisplayId) {
+      if (!window.isDestroyed()) {
+        window.hide();
+      }
+      continue;
+    }
+
     applyOverlayStateToWindow(window);
   }
 }
@@ -462,7 +528,7 @@ function createOverlayForDisplay(display: Electron.Display): BrowserWindow {
   }
   win.loadFile(rendererPath('overlay.html'));
   win.webContents.on('did-finish-load', () => {
-    applyOverlayStateToWindow(win);
+    applyOverlayStateToAllWindows();
   });
   return win;
 }
@@ -554,10 +620,18 @@ function refreshOverlayWindows(): void {
   }
 }
 
+function setActiveOverlayDisplayFromCursor(): void {
+  const point = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(point);
+  activeOverlayDisplayId = display.id;
+  log(`[Overlay] Active display ${display.id} from cursor ${point.x},${point.y}`);
+}
+
 function showOverlay(): void {
   clearOverlayHideTimeout();
   overlayState = 'recording';
   refreshOverlayWindows();
+  setActiveOverlayDisplayFromCursor();
   applyOverlayStateToAllWindows();
 }
 
@@ -569,6 +643,7 @@ function hideOverlay(): void {
   overlayHideTimeout = setTimeout(() => {
     if (overlayState !== 'processing') return;
     overlayState = 'hidden';
+    activeOverlayDisplayId = null;
     applyOverlayStateToAllWindows();
     overlayHideTimeout = null;
   }, 500);
@@ -577,6 +652,7 @@ function hideOverlay(): void {
 function hideOverlayNow(): void {
   clearOverlayHideTimeout();
   overlayState = 'hidden';
+  activeOverlayDisplayId = null;
   applyOverlayStateToAllWindows();
 }
 
@@ -591,74 +667,203 @@ function checkPermissions(): void {
 
   const isTrusted = systemPreferences.isTrustedAccessibilityClient(false);
   if (!isTrusted) {
-    dialog
-      .showMessageBox({
-        type: 'warning',
-        title: 'Accessibility Permission Required',
-        message:
-          'WhisperAlone needs Accessibility permission to detect the Command key and inject text.',
-        detail:
-          'Go to System Settings > Privacy & Security > Accessibility and add WhisperAlone.',
-        buttons: ['Open System Settings', 'Later'],
-      })
-      .then(({ response }) => {
-        if (response === 0) {
-          systemPreferences.isTrustedAccessibilityClient(true);
-        }
-      });
+    log(`[Permissions] Accessibility permission is not trusted for ${app.getPath('exe')}.`);
   }
 
   const micStatus = systemPreferences.getMediaAccessStatus('microphone');
-  if (micStatus !== 'granted') {
+  if (micStatus === 'not-determined') {
     systemPreferences.askForMediaAccess('microphone');
   }
 }
 
 // --- Hotkey + IPC ---
 
-function setupHotkey(): void {
+function showHotkeyPermissionNotification(): void {
+  if (hotkeyPermissionWarningShown) return;
+  hotkeyPermissionWarningShown = true;
+  new Notification({
+    title: 'WhisperAlone needs Accessibility',
+    body: 'Re-add WhisperAlone in Privacy & Security > Accessibility. The hotkey will turn on automatically.',
+  }).show();
+}
+
+function openAccessibilitySettings(): void {
+  shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility').catch((err) => {
+    logError('[Permissions] Failed to open Accessibility settings:', err);
+  });
+}
+
+function promptForAccessibility(): void {
+  systemPreferences.isTrustedAccessibilityClient(true);
+  openAccessibilitySettings();
+  startHotkeyIfTrusted(false);
+}
+
+function stopHotkeyPermissionWatcher(): void {
+  if (!hotkeyPermissionRetryInterval) return;
+  clearInterval(hotkeyPermissionRetryInterval);
+  hotkeyPermissionRetryInterval = null;
+}
+
+function scheduleHotkeyPermissionRetry(): void {
+  if (hotkeyPermissionRetryInterval) return;
+
+  hotkeyPermissionRetryInterval = setInterval(() => {
+    startHotkeyIfTrusted(false);
+  }, 2500);
+}
+
+function startHotkeyIfTrusted(notifyWhenMissing = true): boolean {
+  if (hotkey) return true;
+
+  if (!systemPreferences.isTrustedAccessibilityClient(false)) {
+    const alreadyWatching = hotkeyPermissionRetryInterval !== null;
+    if (notifyWhenMissing || !alreadyWatching) {
+      log('[Hotkey] Accessibility permission is not trusted; global hotkey disabled until permission is granted.');
+    }
+    if (notifyWhenMissing) {
+      showHotkeyPermissionNotification();
+    }
+    scheduleHotkeyPermissionRetry();
+    return false;
+  }
+
+  stopHotkeyPermissionWatcher();
+  hotkeyPermissionWarningShown = false;
   hotkey = new HotkeyManager();
 
   hotkey.on('recording-start', async () => {
-    log('[WhisperAlone] Recording started');
-    setTrayRecording(true);
-    showOverlay();
-
-    // Start streaming session so audio chunks are forwarded to the server in real-time
-    const settings = getSettings();
-    if (settings.backend === 'mlx' && isMLXServerRunning()) {
-      const ok = await startStreamingSession(settings.mlxModel);
-      if (ok) {
-        log('[WhisperAlone] Streaming session started — chunks will be forwarded');
-      }
-    }
-
-    audioWindow?.webContents.send('start-recording');
+    await beginRecording('double-tap Command');
   });
 
   hotkey.on('recording-stop', () => {
-    log('[WhisperAlone] Recording stopped, processing...');
-    setTrayRecording(false);
-    hideOverlay();
-    audioWindow?.webContents.send('stop-recording');
+    finishRecording('double-tap Command');
   });
 
-  hotkey.start();
+  try {
+    hotkey.start();
+    log('[Hotkey] Global hotkey started');
+    rebuildTrayMenu();
+    return true;
+  } catch (err) {
+    logError('[Hotkey] Failed to start global hotkey:', err);
+    hotkey = null;
+    new Notification({
+      title: 'WhisperAlone',
+      body: 'Could not start the global hotkey. Check Accessibility permission and reopen the app.',
+    }).show();
+    scheduleHotkeyPermissionRetry();
+    return false;
+  }
+}
+
+async function beginRecording(source: string): Promise<void> {
+  if (recordingState === 'RECORDING') {
+    finishRecording(source);
+    return;
+  }
+  if (recordingState !== 'IDLE') return;
+
+  recordingState = 'RECORDING';
+  log(`[WhisperAlone] Recording started (${source})`);
+  fallbackAudioChunks = [];
+  setTrayRecording(true);
+  rebuildTrayMenu();
+  showOverlay();
+
+  // Start streaming session so audio chunks are forwarded to the server in real-time
+  const settings = getSettings();
+  if (settings.backend === 'mlx' && isMLXServerRunning()) {
+    const ok = await startStreamingSession(settings.mlxModel);
+    if (ok) {
+      log('[WhisperAlone] Streaming session started — chunks will be forwarded');
+    }
+  }
+
+  audioWindow?.webContents.send('start-recording');
+}
+
+function finishRecording(source: string): void {
+  if (recordingState !== 'RECORDING') return;
+
+  recordingState = 'PROCESSING';
+  log(`[WhisperAlone] Recording stopped, processing... (${source})`);
+  setTrayRecording(false);
+  rebuildTrayMenu();
+  hideOverlay();
+  audioWindow?.webContents.send('stop-recording');
+}
+
+function resetRecordingState(): void {
+  recordingState = 'IDLE';
+  hotkey?.setIdle();
+  rebuildTrayMenu();
+}
+
+function toggleRecording(source: string): void {
+  if (recordingState === 'IDLE') {
+    void beginRecording(source);
+  } else if (recordingState === 'RECORDING') {
+    finishRecording(source);
+  }
+}
+
+function registerFallbackRecordingShortcut(): void {
+  if (globalShortcut.isRegistered(FALLBACK_RECORDING_ACCELERATOR)) return;
+
+  const registered = globalShortcut.register(FALLBACK_RECORDING_ACCELERATOR, () => {
+    toggleRecording(FALLBACK_RECORDING_ACCELERATOR);
+  });
+
+  if (registered) {
+    log(`[Hotkey] Fallback shortcut registered: ${FALLBACK_RECORDING_ACCELERATOR}`);
+  } else {
+    logError(`[Hotkey] Failed to register fallback shortcut: ${FALLBACK_RECORDING_ACCELERATOR}`);
+  }
+}
+
+function normalizeAudioDataPayload(payload: AudioDataPayload): {
+  bytes: number[];
+  durationMs?: number;
+  audioSizeBytes?: number;
+} {
+  if (Array.isArray(payload)) {
+    return { bytes: payload };
+  }
+
+  const bytes = Array.isArray(payload?.bytes) ? payload.bytes : [];
+  const durationMs =
+    typeof payload?.durationMs === 'number' && Number.isFinite(payload.durationMs)
+      ? payload.durationMs
+      : undefined;
+  const audioSizeBytes =
+    typeof payload?.audioSizeBytes === 'number' && Number.isFinite(payload.audioSizeBytes)
+      ? payload.audioSizeBytes
+      : undefined;
+
+  return { bytes, durationMs, audioSizeBytes };
 }
 
 function setupIPC(): void {
   // Forward audio chunks to the MLX streaming server in real-time
   ipcMain.on('audio-chunk', (_event, data: number[]) => {
+    const chunk = Buffer.from(new Uint8Array(data));
     if (isStreamingActive()) {
-      const chunk = Buffer.from(new Uint8Array(data));
       sendStreamChunk(chunk);
+    } else {
+      fallbackAudioChunks.push(chunk);
     }
   });
 
-  ipcMain.on('audio-data', async (_event, data: number[]) => {
-    log(`[WhisperAlone] Received audio-data IPC, data length: ${data?.length ?? 'null'}`);
+  ipcMain.on('audio-data', async (_event, payload: AudioDataPayload) => {
+    const { bytes, durationMs, audioSizeBytes } = normalizeAudioDataPayload(payload);
+    log(`[WhisperAlone] Received audio-data IPC, data length: ${bytes.length}`);
     try {
-      const buffer = Buffer.from(new Uint8Array(data));
+      let buffer = Buffer.from(new Uint8Array(bytes));
+      if (!isStreamingActive() && buffer.length === 0 && fallbackAudioChunks.length > 0) {
+        buffer = Buffer.concat(fallbackAudioChunks);
+        log(`[WhisperAlone] Reconstructed batch audio from ${fallbackAudioChunks.length} chunks`);
+      }
       const settings = getSettings();
       let text: string;
 
@@ -668,7 +873,7 @@ function setupIPC(): void {
         text = await finishStreamingSession();
       } else if (buffer.length < 2000) {
         log(`[WhisperAlone] Recording too short (${buffer.length} bytes), skipping`);
-        hotkey?.setIdle();
+        resetRecordingState();
         return;
       } else {
         // Fallback: batch transcription
@@ -687,8 +892,9 @@ function setupIPC(): void {
           log(`[WhisperAlone] Routed to ${route.destination}`);
         }
 
-        addHistoryEntry(text, buffer.length);
-        mainWindow?.webContents.send('history-update', getHistory());
+        addHistoryEntry(text, audioSizeBytes ?? buffer.length, durationMs);
+        sendMainWindow('history-update', getHistory());
+        sendMainWindow('usage-stats-update', getUsageStats());
       } else {
         log('[WhisperAlone] Empty transcription, skipping');
       }
@@ -703,15 +909,17 @@ function setupIPC(): void {
         body: `Transcription failed. ${detail}`,
       }).show();
     } finally {
+      fallbackAudioChunks = [];
       hideOverlayNow();
-      hotkey?.setIdle();
+      resetRecordingState();
     }
   });
 
   ipcMain.on('recording-error', (_event, message: string) => {
     logError('[WhisperAlone] Recording error:', message);
     setTrayRecording(false);
-    hotkey?.setIdle();
+    hideOverlayNow();
+    resetRecordingState();
     new Notification({
       title: 'WhisperAlone',
       body: `Recording failed: ${message}`,
@@ -719,6 +927,7 @@ function setupIPC(): void {
   });
 
   ipcMain.handle('get-history', () => getHistory());
+  ipcMain.handle('get-usage-stats', () => getUsageStats());
   ipcMain.handle('get-settings', () => getSettings());
   ipcMain.handle('set-settings', (_event, input: Record<string, unknown>) => {
     const safe: Record<string, unknown> = {};
@@ -745,7 +954,7 @@ app.whenReady().then(async () => {
       submenu: [
         { role: 'about' },
         { type: 'separator' },
-        { label: 'Show History', click: () => showMainWindow() },
+        { label: 'Show Dashboard', click: () => showMainWindow() },
         { type: 'separator' },
         { role: 'hide' },
         { role: 'hideOthers' },
@@ -770,6 +979,8 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(appMenu);
 
   createTray();
+  setupIPC();
+  initializePersistentData();
   createMainWindow();
   createAudioWindow();
   createOverlayWindows();
@@ -777,8 +988,8 @@ app.whenReady().then(async () => {
   screen.on('display-removed', () => scheduleOverlaySync());
   screen.on('display-metrics-changed', () => scheduleOverlaySync());
   checkPermissions();
-  setupIPC();
-  setupHotkey();
+  registerFallbackRecordingShortcut();
+  startHotkeyIfTrusted(false);
   setServerCrashHandler(() => rebuildTrayMenu());
 
   const settings = getSettings();
@@ -805,6 +1016,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', async () => {
+  stopHotkeyPermissionWatcher();
+  globalShortcut.unregister(FALLBACK_RECORDING_ACCELERATOR);
   hotkey?.stop();
   await stopMLXServer();
   mainWindow?.removeAllListeners('close');

@@ -11,9 +11,71 @@
 <body>
   <div id="app">
     <header id="titlebar">
-      <h1>WhisperAlone</h1>
-      <p class="subtitle">Transcription History</p>
+      <div>
+        <h1>WhisperAlone</h1>
+        <p class="subtitle">Dictation stats and history</p>
+      </div>
+      <div class="title-status" id="last-used">No sessions yet</div>
     </header>
+    <section id="stats-panel" aria-label="Dictation stats">
+      <div class="summary-grid">
+        <article class="metric-card metric-card-primary">
+          <div class="metric-header">
+            <span class="metric-label">Saved words</span>
+            <span class="stat-chip" id="month-trend">No data yet</span>
+          </div>
+          <strong class="metric-value" id="stat-total-words">0</strong>
+          <span class="metric-caption" id="stat-total-caption">tracked dictation total</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">This month</span>
+          <strong class="metric-value" id="stat-month-words">0</strong>
+          <span class="metric-caption" id="stat-month-caption">words this month</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Today</span>
+          <strong class="metric-value" id="stat-today-words">0</strong>
+          <span class="metric-caption">words today</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Sessions</span>
+          <strong class="metric-value" id="stat-sessions">0</strong>
+          <span class="metric-caption" id="stat-month-sessions">0 this month</span>
+        </article>
+      </div>
+
+      <article class="stat-card timeline-card">
+        <div class="timeline-header">
+          <div>
+            <span class="metric-label">Words by day</span>
+            <h2>Last 14 days</h2>
+          </div>
+          <div class="timeline-summary">
+            <span><strong id="timeline-total">0</strong> words</span>
+            <span><strong id="timeline-average">0</strong> avg/day</span>
+          </div>
+        </div>
+        <div class="timeline-chart">
+          <div class="timeline-scale" aria-hidden="true">
+            <span id="timeline-max">0</span>
+            <span id="timeline-mid">0</span>
+            <span>0</span>
+          </div>
+          <div class="timeline-plot">
+            <div class="timeline-grid" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+            <div class="timeline-bars" id="timeline-bars" aria-label="Daily dictated words"></div>
+          </div>
+        </div>
+      </article>
+    </section>
+    <div class="history-heading">
+      <h2>Recent dictation</h2>
+      <span id="history-count">0 entries</span>
+    </div>
     <div id="history-list"></div>
     <div id="empty-state">
       <div class="empty-icon">🎤</div>

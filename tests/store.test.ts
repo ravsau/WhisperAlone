@@ -27,9 +27,17 @@ vi.mock('electron-conf', () => ({
 
 vi.stubGlobal('crypto', { randomUUID: () => 'test-uuid-1234' });
 
-import { addHistoryEntry, getHistory, clearHistory, getSettings, setSettings } from '../src/main/store';
+import {
+  addHistoryEntry,
+  getHistory,
+  clearHistory,
+  getSettings,
+  getUsageStats,
+  setSettings,
+} from '../src/main/store';
 
 beforeEach(() => {
+  process.env.WHISPERALONE_DISABLE_LOG_RECOVERY = '1';
   mockStore.clear();
   mockStore.set('history', []);
   mockStore.set('settings', { backend: 'mlx', mlxModel: 'mlx-community/whisper-large-v3-turbo' });
@@ -41,6 +49,8 @@ describe('History', () => {
     expect(entry.text).toBe('hello world');
     expect(entry.id).toBe('test-uuid-1234');
     expect(entry.duration).toBe(2);
+    expect(entry.wordCount).toBe(2);
+    expect(entry.durationSource).toBe('estimated');
     expect(entry.timestamp).toBeGreaterThan(0);
   });
 
@@ -53,12 +63,12 @@ describe('History', () => {
     expect(history[1].text).toBe('first');
   });
 
-  it('caps history at 500 entries', () => {
+  it('keeps history entries instead of capping at 500', () => {
     for (let i = 0; i < 510; i++) {
       addHistoryEntry(`entry ${i}`, 4000);
     }
     const history = getHistory();
-    expect(history.length).toBe(500);
+    expect(history.length).toBe(510);
   });
 
   it('clears history', () => {
@@ -70,11 +80,93 @@ describe('History', () => {
   it('estimates duration from audio size', () => {
     const entry = addHistoryEntry('test', 20000);
     expect(entry.duration).toBe(5);
+    expect(entry.durationSource).toBe('estimated');
+  });
+
+  it('records explicit duration from recorder timing', () => {
+    const entry = addHistoryEntry('test', 20000, 4200);
+    expect(entry.duration).toBe(4);
+    expect(entry.durationSource).toBe('recorded');
   });
 
   it('sets minimum duration to 1 second', () => {
     const entry = addHistoryEntry('test', 100);
     expect(entry.duration).toBe(1);
+  });
+});
+
+describe('Usage stats', () => {
+  it('tracks totals when adding a history entry', () => {
+    addHistoryEntry('hello world from whisper', 8000, 4200);
+
+    const stats = getUsageStats();
+    const daily = Object.values(stats.daily);
+
+    expect(stats.totalSessions).toBe(1);
+    expect(stats.totalWords).toBe(4);
+    expect(stats.totalDictationSeconds).toBe(4);
+    expect(stats.trackedDictationSeconds).toBe(4);
+    expect(stats.trackedDictationSessions).toBe(1);
+    expect(stats.firstRecordedAt).toBeGreaterThan(0);
+    expect(stats.lastRecordedAt).toBe(stats.firstRecordedAt);
+    expect(daily).toHaveLength(1);
+    expect(daily[0]).toMatchObject({
+      sessions: 1,
+      words: 4,
+      dictationSeconds: 4,
+      trackedDictationSeconds: 4,
+      trackedDictationSessions: 1,
+    });
+  });
+
+  it('initializes usage stats from existing history once', () => {
+    mockStore.set('history', [
+      {
+        id: 'old-entry',
+        text: 'existing dictated words',
+        timestamp: Date.now() - 1000,
+        duration: 5,
+      },
+    ]);
+
+    const initialized = getUsageStats();
+    const secondRead = getUsageStats();
+
+    expect(initialized.initializedFromHistory).toBe(true);
+    expect(initialized.totalSessions).toBe(1);
+    expect(initialized.totalWords).toBe(3);
+    expect(initialized.totalDictationSeconds).toBe(5);
+    expect(initialized.trackedDictationSeconds).toBe(0);
+    expect(initialized.trackedDictationSessions).toBe(0);
+    expect(secondRead.totalSessions).toBe(1);
+    expect(secondRead.totalWords).toBe(3);
+  });
+
+  it('rebuilds old usage stats schemas from history', () => {
+    mockStore.set('history', [
+      {
+        id: 'old-entry',
+        text: 'existing dictated words',
+        timestamp: Date.now() - 1000,
+        duration: 5,
+      },
+    ]);
+    mockStore.set('usageStats', {
+      initializedFromHistory: true,
+      totalSessions: 999,
+      totalWords: 999,
+      totalDictationSeconds: 999,
+      firstRecordedAt: Date.now(),
+      lastRecordedAt: Date.now(),
+      daily: {},
+    });
+
+    const rebuilt = getUsageStats();
+
+    expect(rebuilt.schemaVersion).toBe(4);
+    expect(rebuilt.totalSessions).toBe(1);
+    expect(rebuilt.totalWords).toBe(3);
+    expect(rebuilt.trackedDictationSeconds).toBe(0);
   });
 });
 

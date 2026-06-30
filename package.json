@@ -10,6 +10,9 @@
     "start": "npm run prepare:dev-permissions && npm run build && electron ./dist/main/main.js",
     "postinstall": "electron-rebuild",
     "dist": "npm run build && electron-builder --mac",
+    "dist:dir": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --publish never",
+    "sign:local": "bash ./scripts/sign-local-app.sh",
+    "install:local": "npm run dist:dir && npm run sign:local && bash ./scripts/install-local-app.sh",
     "test": "vitest run"
   },
   "author": "",
@@ -33,10 +36,13 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": "dmg",
+      "hardenedRuntime": true,
       "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
         "NSMicrophoneUsageDescription": "WhisperAlone needs microphone access to record audio for transcription.",
-        "NSAppleEventsUsageDescription": "WhisperAlone needs automation access to paste transcribed text."
+        "NSAppleEventsUsageDescription": "WhisperAlone needs automation access to paste transcribed text.",
+        "NSAccessibilityUsageDescription": "WhisperAlone needs Accessibility permission to detect the dictation hotkey and paste transcribed text."
       }
     },
     "icon": "build/icon.icns",
