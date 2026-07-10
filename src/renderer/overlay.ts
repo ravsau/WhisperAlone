@@ -1,14 +1,13 @@
-const NUM_BARS = 24;
+const NUM_BARS = 16;
 const waveform = document.getElementById('waveform')!;
 const pill = document.getElementById('pill')!;
-const label = document.getElementById('label')!;
 
 // Create bars
 const bars: HTMLDivElement[] = [];
 for (let i = 0; i < NUM_BARS; i++) {
   const bar = document.createElement('div');
   bar.className = 'bar';
-  bar.style.height = '4px';
+  bar.style.height = '3px';
   waveform.appendChild(bar);
   bars.push(bar);
 }
@@ -25,7 +24,7 @@ function animateBars() {
     const time = Date.now() / 150;
     const wave = Math.sin(time + i * 0.4) * 0.5 + 0.5;
     const random = Math.random() * 0.3;
-    const height = 4 + (wave + random) * 20;
+    const height = 3 + (wave + random) * 10;
     bar.style.height = `${height}px`;
     bar.style.opacity = `${0.5 + wave * 0.5}`;
   });
@@ -36,14 +35,12 @@ function animateBars() {
 function startAnimation() {
   isRecording = true;
   pill.classList.remove('processing');
-  label.textContent = 'Listening...';
   animateBars();
 }
 
 function stopAnimation() {
   isRecording = false;
   pill.classList.add('processing');
-  label.textContent = 'Transcribing...';
 
   if (animationId !== null) {
     cancelAnimationFrame(animationId);
@@ -52,7 +49,7 @@ function stopAnimation() {
 
   // Flatten bars
   bars.forEach((bar) => {
-    bar.style.height = '4px';
+    bar.style.height = '3px';
     bar.style.opacity = '0.4';
   });
 }

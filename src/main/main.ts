@@ -30,6 +30,7 @@ import {
 } from './voice-router';
 
 import os from 'os';
+import { spawn } from 'child_process';
 
 // Load API key from user-level ~/.env
 dotenv.config({ path: path.join(os.homedir(), '.env') });
@@ -37,13 +38,12 @@ dotenv.config({ path: path.join(os.homedir(), '.env') });
 let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
 let audioWindow: BrowserWindow | null = null;
-let overlayWindows: Array<{ displayId: number; window: BrowserWindow }> = [];
+let overlayWindow: BrowserWindow | null = null;
 let setupWindow: BrowserWindow | null = null;
 let hotkey: HotkeyManager | null = null;
 let overlayState: 'hidden' | 'recording' | 'processing' = 'hidden';
-let activeOverlayDisplayId: number | null = null;
 let overlayHideTimeout: NodeJS.Timeout | null = null;
-let overlaySyncTimeout: NodeJS.Timeout | null = null;
+let overlayFollowInterval: NodeJS.Timeout | null = null;
 let hotkeyPermissionRetryInterval: NodeJS.Timeout | null = null;
 let hotkeyPermissionWarningShown = false;
 let fallbackAudioChunks: Buffer[] = [];
@@ -449,7 +449,7 @@ function createAudioWindow(): void {
 
 // --- Overlay ---
 
-const OVERLAY_STRIP_HEIGHT = 120;
+const OVERLAY_STRIP_HEIGHT = 70;
 
 function getOverlayBounds(display: Electron.Display): Electron.Rectangle {
   const { x, y, width, height } = display.workArea;
@@ -461,10 +461,6 @@ function getOverlayBounds(display: Electron.Display): Electron.Rectangle {
   };
 }
 
-function positionOverlayWindow(win: BrowserWindow, display: Electron.Display): void {
-  win.setBounds(getOverlayBounds(display), false);
-}
-
 function clearOverlayHideTimeout(): void {
   if (overlayHideTimeout) {
     clearTimeout(overlayHideTimeout);
@@ -472,40 +468,15 @@ function clearOverlayHideTimeout(): void {
   }
 }
 
-function applyOverlayStateToWindow(win: BrowserWindow): void {
-  if (win.isDestroyed()) return;
+function ensureOverlayWindow(): BrowserWindow {
+  if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow;
 
-  if (overlayState === 'hidden') {
-    win.hide();
-    return;
-  }
-
-  if (!win.webContents.isLoadingMainFrame()) {
-    win.webContents.send(
-      overlayState === 'recording' ? 'start-recording' : 'stop-recording',
-    );
-  }
-
-  win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'floating');
-  win.showInactive();
-}
-
-function applyOverlayStateToAllWindows(): void {
-  for (const { displayId, window } of overlayWindows) {
-    if (overlayState !== 'hidden' && activeOverlayDisplayId !== null && displayId !== activeOverlayDisplayId) {
-      if (!window.isDestroyed()) {
-        window.hide();
-      }
-      continue;
-    }
-
-    applyOverlayStateToWindow(window);
-  }
-}
-
-function createOverlayForDisplay(display: Electron.Display): BrowserWindow {
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const win = new BrowserWindow({
     ...getOverlayBounds(display),
+    // 'panel' (NSPanel) is required: a regular window of a tray/accessory app
+    // reports visible=true but macOS never orders it onto the active Space.
+    type: 'panel',
     show: false,
     frame: false,
     transparent: true,
@@ -522,131 +493,111 @@ function createOverlayForDisplay(display: Electron.Display): BrowserWindow {
 
   win.setIgnoreMouseEvents(true);
   win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'floating');
+  // Note: do NOT combine with setHiddenInMissionControl(true) — its Transient
+  // collection behavior conflicts with CanJoinAllSpaces and can keep the
+  // window off other Spaces / fullscreen apps entirely.
   win.setVisibleOnAllWorkspaces(true, {
     visibleOnFullScreen: true,
   });
-  if (process.platform === 'darwin') {
-    win.setHiddenInMissionControl(true);
-  }
   win.loadFile(rendererPath('overlay.html'));
   win.webContents.on('did-finish-load', () => {
-    applyOverlayStateToAllWindows();
+    applyOverlayState();
   });
+  win.webContents.on('did-fail-load', (_e, code, desc) => {
+    logError(`[Overlay] Failed to load overlay page: ${code} ${desc}`);
+  });
+  win.webContents.on('render-process-gone', (_e, details) => {
+    logError(`[Overlay] Renderer gone: ${details.reason}`);
+  });
+  win.on('closed', () => {
+    if (overlayWindow === win) overlayWindow = null;
+  });
+  overlayWindow = win;
   return win;
 }
 
-function createOverlayWindows(): void {
-  // Close any existing overlays
-  for (const { window } of overlayWindows) {
-    if (!window.isDestroyed()) window.close();
-  }
-  overlayWindows = [];
-
-  // Create one overlay per display
-  const displays = screen.getAllDisplays();
-  for (const display of displays) {
-    overlayWindows.push({
-      displayId: display.id,
-      window: createOverlayForDisplay(display),
-    });
-  }
-  const displaySummary = displays
-    .map(({ id, bounds, workArea }) => `${id}: bounds=${bounds.width}x${bounds.height}@${bounds.x},${bounds.y} workArea=${workArea.width}x${workArea.height}@${workArea.x},${workArea.y}`)
-    .join(' | ');
-  log(`[Main] Created ${overlayWindows.length} overlay(s) for ${displays.length} display(s)${displaySummary ? ` [${displaySummary}]` : ''}`);
-}
-
-function syncOverlayWindows(): void {
-  const displays = screen.getAllDisplays();
-  const displayMap = new Map(displays.map((display) => [display.id, display]));
-  const nextOverlayWindows: Array<{ displayId: number; window: BrowserWindow }> = [];
-  const currentWindows = new Map(overlayWindows.map((entry) => [entry.displayId, entry.window]));
-
-  for (const [displayId, window] of currentWindows) {
-    if (window.isDestroyed()) {
-      currentWindows.delete(displayId);
-    }
-  }
-
-  for (const [displayId, window] of currentWindows) {
-    if (!displayMap.has(displayId) && !window.isDestroyed()) {
-      window.close();
-    }
-  }
-
-  for (const display of displays) {
-    const existingWindow = currentWindows.get(display.id);
-    const window = existingWindow && !existingWindow.isDestroyed()
-      ? existingWindow
-      : createOverlayForDisplay(display);
-
-    positionOverlayWindow(window, display);
-    window.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'floating');
-    nextOverlayWindows.push({ displayId: display.id, window });
-  }
-
-  overlayWindows = nextOverlayWindows;
-}
-
-function scheduleOverlaySync(): void {
-  if (overlaySyncTimeout) {
-    clearTimeout(overlaySyncTimeout);
-  }
-
-  overlaySyncTimeout = setTimeout(() => {
-    overlaySyncTimeout = null;
-    syncOverlayWindows();
-    applyOverlayStateToAllWindows();
-  }, 100);
-}
-
-function logOverlayDisplays(): void {
-  const displays = screen.getAllDisplays();
-  const displaySummary = displays
-    .map(({ id, bounds, workArea }) => `${id}: bounds=${bounds.width}x${bounds.height}@${bounds.x},${bounds.y} workArea=${workArea.width}x${workArea.height}@${workArea.x},${workArea.y}`)
-    .join(' | ');
-  log(`[Main] Synced ${overlayWindows.length} overlay(s) across ${displays.length} display(s)${displaySummary ? ` [${displaySummary}]` : ''}`);
-}
-
-function refreshOverlayWindows(): void {
-  const beforeCount = overlayWindows.length;
-  syncOverlayWindows();
-
-  if (overlayWindows.length !== beforeCount) {
-    logOverlayDisplays();
-  } else {
-    const recreated = overlayWindows.some(({ window }) => window.isDestroyed());
-    if (recreated) {
-      logOverlayDisplays();
-    }
-  }
-}
-
-function setActiveOverlayDisplayFromCursor(): void {
+// Move the overlay onto whichever display the cursor is on. Returns true if it moved.
+function positionOverlayOnCursorDisplay(): boolean {
+  const win = ensureOverlayWindow();
   const point = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(point);
-  activeOverlayDisplayId = display.id;
-  log(`[Overlay] Active display ${display.id} from cursor ${point.x},${point.y}`);
+  const target = getOverlayBounds(display);
+  const current = win.getBounds();
+  if (
+    target.x === current.x && target.y === current.y &&
+    target.width === current.width && target.height === current.height
+  ) {
+    return false;
+  }
+  win.setBounds(target, false);
+  log(`[Overlay] Positioned on display ${display.id} at ${target.x},${target.y} ${target.width}x${target.height} (cursor ${point.x},${point.y})`);
+  return true;
+}
+
+function applyOverlayState(): void {
+  const win = overlayWindow;
+  if (!win || win.isDestroyed()) return;
+
+  if (overlayState === 'hidden') {
+    win.hide();
+    return;
+  }
+
+  if (!win.webContents.isLoadingMainFrame()) {
+    win.webContents.send(
+      overlayState === 'recording' ? 'start-recording' : 'stop-recording',
+    );
+  }
+
+  // Re-assert every show: Space/fullscreen transitions can drop these.
+  win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'screen-saver' : 'floating');
+  win.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+  });
+  win.showInactive();
+  log(`[Overlay] State ${overlayState}: visible=${win.isVisible()} bounds=${JSON.stringify(win.getBounds())}`);
+}
+
+// Keep the overlay on whichever display the cursor is on, so it follows
+// the user across screens mid-recording.
+const OVERLAY_FOLLOW_INTERVAL_MS = 350;
+
+function startOverlayFollow(): void {
+  if (overlayFollowInterval) return;
+  overlayFollowInterval = setInterval(() => {
+    if (overlayState === 'hidden') {
+      stopOverlayFollow();
+      return;
+    }
+    positionOverlayOnCursorDisplay();
+  }, OVERLAY_FOLLOW_INTERVAL_MS);
+}
+
+function stopOverlayFollow(): void {
+  if (overlayFollowInterval) {
+    clearInterval(overlayFollowInterval);
+    overlayFollowInterval = null;
+  }
 }
 
 function showOverlay(): void {
   clearOverlayHideTimeout();
   overlayState = 'recording';
-  refreshOverlayWindows();
-  setActiveOverlayDisplayFromCursor();
-  applyOverlayStateToAllWindows();
+  ensureOverlayWindow();
+  positionOverlayOnCursorDisplay();
+  applyOverlayState();
+  startOverlayFollow();
 }
 
 function hideOverlay(): void {
   clearOverlayHideTimeout();
   overlayState = 'processing';
-  refreshOverlayWindows();
-  applyOverlayStateToAllWindows();
+  applyOverlayState();
   overlayHideTimeout = setTimeout(() => {
     if (overlayState !== 'processing') return;
     overlayState = 'hidden';
-    activeOverlayDisplayId = null;
-    applyOverlayStateToAllWindows();
+    stopOverlayFollow();
+    applyOverlayState();
     overlayHideTimeout = null;
   }, 500);
 }
@@ -654,8 +605,22 @@ function hideOverlay(): void {
 function hideOverlayNow(): void {
   clearOverlayHideTimeout();
   overlayState = 'hidden';
-  activeOverlayDisplayId = null;
-  applyOverlayStateToAllWindows();
+  stopOverlayFollow();
+  applyOverlayState();
+}
+
+// --- Sound cues ---
+
+function playCue(sound: 'start' | 'stop'): void {
+  if (process.platform !== 'darwin') return;
+  // afplay is an external process: it cannot read inside app.asar, so the
+  // wavs are asarUnpack'd and we point at the unpacked copy.
+  const file = assetPath(`cue-${sound}.wav`).replace('app.asar', 'app.asar.unpacked');
+  try {
+    spawn('afplay', ['-v', '0.5', file], { stdio: 'ignore', detached: false });
+  } catch {
+    // Sound is best-effort; never block recording on it
+  }
 }
 
 // --- Permissions ---
@@ -768,6 +733,7 @@ async function beginRecording(source: string): Promise<void> {
 
   recordingState = 'RECORDING';
   log(`[WhisperAlone] Recording started (${source})`);
+  playCue('start');
   fallbackAudioChunks = [];
   setTrayRecording(true);
   rebuildTrayMenu();
@@ -790,6 +756,7 @@ function finishRecording(source: string): void {
 
   recordingState = 'PROCESSING';
   log(`[WhisperAlone] Recording stopped, processing... (${source})`);
+  playCue('stop');
   setTrayRecording(false);
   rebuildTrayMenu();
   hideOverlay();
@@ -985,10 +952,13 @@ app.whenReady().then(async () => {
   initializePersistentData();
   createMainWindow();
   createAudioWindow();
-  createOverlayWindows();
-  screen.on('display-added', () => scheduleOverlaySync());
-  screen.on('display-removed', () => scheduleOverlaySync());
-  screen.on('display-metrics-changed', () => scheduleOverlaySync());
+  ensureOverlayWindow();
+  const onDisplayChange = (): void => {
+    if (overlayState !== 'hidden') positionOverlayOnCursorDisplay();
+  };
+  screen.on('display-added', onDisplayChange);
+  screen.on('display-removed', onDisplayChange);
+  screen.on('display-metrics-changed', onDisplayChange);
   checkPermissions();
   registerFallbackRecordingShortcut();
   startHotkeyIfTrusted(false);
@@ -1028,8 +998,6 @@ app.on('before-quit', async () => {
   mainWindow?.removeAllListeners('close');
   mainWindow?.close();
   audioWindow?.close();
-  for (const { window } of overlayWindows) {
-    if (!window.isDestroyed()) window.close();
-  }
+  if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.close();
   setupWindow?.close();
 });

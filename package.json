@@ -1,7 +1,7 @@
 {
   "name": "whisper-alone",
   "version": "1.0.0",
-  "description": "Voice-to-text macOS app — double-tap Command to transcribe with Whisper",
+  "description": "Voice-to-text macOS app \u2014 double-tap Command to transcribe with Whisper",
   "main": "dist/main/main.js",
   "scripts": {
     "build": "tsc && tsc -p tsconfig.renderer.json",
@@ -55,6 +55,9 @@
       "scripts/prepare-dev-permissions.sh",
       "src/renderer/**/*.html",
       "src/renderer/**/*.css"
+    ],
+    "asarUnpack": [
+      "assets/*.wav"
     ]
   }
 }
