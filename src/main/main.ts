@@ -48,6 +48,7 @@ let hotkeyPermissionRetryInterval: NodeJS.Timeout | null = null;
 let hotkeyPermissionWarningShown = false;
 let fallbackAudioChunks: Buffer[] = [];
 let recordingState: AppState = 'IDLE';
+let isQuitting = false;
 
 const FALLBACK_RECORDING_ACCELERATOR = 'CommandOrControl+Shift+Space';
 
@@ -389,6 +390,7 @@ function createMainWindow(): void {
   win.loadFile(rendererPath('index.html'));
 
   win.on('close', (e) => {
+    if (isQuitting) return;
     e.preventDefault();
     if (!win.isDestroyed()) {
       win.hide();
@@ -1016,6 +1018,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', async () => {
+  // Must be set before any window 'close' fires: a prevented close aborts the
+  // quit, leaving the app alive with the hotkey already stopped.
+  isQuitting = true;
   stopHotkeyPermissionWatcher();
   globalShortcut.unregister(FALLBACK_RECORDING_ACCELERATOR);
   hotkey?.stop();
