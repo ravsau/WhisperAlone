@@ -14,6 +14,9 @@ interface AudioDataPayload {
   bytes: number[];
   durationMs?: number;
   audioSizeBytes?: number;
+  speechDetected?: boolean;
+  speechStartMs?: number;
+  speechEndMs?: number;
 }
 
 interface DailyUsageStats {
@@ -42,7 +45,6 @@ interface WhisperAloneAPI {
   onStartRecording: (callback: () => void) => void;
   onStopRecording: (callback: () => void) => void;
   sendAudioData: (payload: number[] | AudioDataPayload) => void;
-  sendAudioChunk: (data: number[]) => void;
   sendRecordingError: (message: string) => void;
 
   // History

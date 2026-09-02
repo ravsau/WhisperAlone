@@ -41,6 +41,28 @@ describe('MLX Server Script', () => {
     const content = fs.readFileSync(scriptPath, 'utf-8');
     expect(content).toContain('18456');
   });
+
+  it('uses VAD clip timestamps and disables cross-window prompting', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const scriptPath = path.join(__dirname, '../scripts/mlx-server.py');
+    const content = fs.readFileSync(scriptPath, 'utf-8');
+
+    expect(content).toContain('clip_timestamps');
+    expect(content).toContain('condition_on_previous_text');
+    expect(content).toContain('False');
+  });
+
+  it('does not expose the old chunk-buffering endpoints', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const scriptPath = path.join(__dirname, '../scripts/mlx-server.py');
+    const content = fs.readFileSync(scriptPath, 'utf-8');
+
+    expect(content).not.toContain('/stream/start');
+    expect(content).not.toContain('/stream/chunk');
+    expect(content).not.toContain('/stream/finish');
+  });
 });
 
 describe('Multipart form building', () => {

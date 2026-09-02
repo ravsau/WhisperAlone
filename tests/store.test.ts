@@ -25,6 +25,11 @@ vi.mock('electron-conf', () => ({
   },
 }));
 
+vi.mock('../src/main/logger', () => ({
+  log: vi.fn(),
+  logError: vi.fn(),
+}));
+
 vi.stubGlobal('crypto', { randomUUID: () => 'test-uuid-1234' });
 
 import {
@@ -75,6 +80,32 @@ describe('History', () => {
     addHistoryEntry('test', 4000);
     clearHistory();
     expect(getHistory().length).toBe(0);
+  });
+
+  it('migrates past repetition loops and rebuilds word counts', () => {
+    mockStore.set('transcriptCleanupVersion', 0);
+    mockStore.set('history', [
+      {
+        id: 'corrupt-entry',
+        text: `Keep this. ${'On '.repeat(30)}`,
+        timestamp: Date.now(),
+        duration: 10,
+        wordCount: 32,
+      },
+      {
+        id: 'loop-only-entry',
+        text: 'page '.repeat(30),
+        timestamp: Date.now() - 1000,
+        duration: 5,
+        wordCount: 30,
+      },
+    ]);
+
+    const history = getHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0].text).toBe('Keep this.');
+    expect(history[0].wordCount).toBe(2);
+    expect(getUsageStats().totalWords).toBe(2);
   });
 
   it('estimates duration from audio size', () => {

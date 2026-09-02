@@ -6,6 +6,7 @@ import http from 'http';
 import { app, dialog } from 'electron';
 import { log, logError } from './logger';
 import { getSettings } from './store';
+import type { SpeechWindow } from './transcriber';
 
 const MLX_SERVER_PORT = 18456;
 const VENV_DIR = path.join(app.getPath('userData'), 'mlx-venv');
@@ -422,67 +423,13 @@ function httpPost(urlPath: string, body: Buffer, headers: Record<string, string>
   });
 }
 
-// --- Streaming API ---
+// --- Transcription API ---
 
-let streamingActive = false;
-
-export async function startStreamingSession(modelName: string): Promise<boolean> {
-  if (!serverReady) {
-    const ok = await startMLXServer();
-    if (!ok) return false;
-  }
-
-  try {
-    const body = Buffer.from(JSON.stringify({ model: modelName }));
-    const result = await httpPost('/stream/start', body, { 'Content-Type': 'application/json' });
-    streamingActive = result?.status === 'ready';
-    if (streamingActive) {
-      log('[MLX-Server] Streaming session started');
-    }
-    return streamingActive;
-  } catch (err) {
-    logError('[MLX-Server] Failed to start streaming session:', err);
-    return false;
-  }
-}
-
-export async function sendStreamChunk(chunk: Buffer): Promise<void> {
-  if (!streamingActive || !serverReady) return;
-  try {
-    await httpPost('/stream/chunk', chunk, { 'Content-Type': 'application/octet-stream' });
-  } catch (err) {
-    // Non-fatal: a dropped chunk won't break the session
-    logError('[MLX-Server] Failed to send stream chunk:', err);
-  }
-}
-
-export async function finishStreamingSession(): Promise<string> {
-  if (!streamingActive) {
-    throw new Error('No active streaming session');
-  }
-  streamingActive = false;
-
-  if (!serverReady) {
-    throw new Error('MLX server is not running.');
-  }
-
-  const result = await httpPost('/stream/finish', Buffer.alloc(0), {});
-
-  if (result.error) {
-    throw new Error(`MLX streaming transcription failed: ${result.error}`);
-  }
-
-  log('[MLX-Server] Streaming transcription complete');
-  return result.text || '';
-}
-
-export function isStreamingActive(): boolean {
-  return streamingActive;
-}
-
-// --- Legacy batch API (fallback) ---
-
-export async function transcribeViaServer(audioBuffer: Buffer, modelName: string): Promise<string> {
+export async function transcribeViaServer(
+  audioBuffer: Buffer,
+  modelName: string,
+  speechWindow?: SpeechWindow
+): Promise<string> {
   if (!serverReady) {
     log('[MLX-Server] Server not ready, attempting restart before transcription...');
     const ok = await startMLXServer();
@@ -499,6 +446,21 @@ export async function transcribeViaServer(audioBuffer: Buffer, modelName: string
     `Content-Disposition: form-data; name="model"\r\n\r\n` +
     `${modelName}\r\n`
   ));
+
+  if (Number.isFinite(speechWindow?.startMs) && Number.isFinite(speechWindow?.endMs)) {
+    const startSeconds = (speechWindow?.startMs ?? 0) / 1000;
+    const endSeconds = (speechWindow?.endMs ?? 0) / 1000;
+    parts.push(Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="clip_start"\r\n\r\n` +
+      `${startSeconds}\r\n`
+    ));
+    parts.push(Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="clip_end"\r\n\r\n` +
+      `${endSeconds}\r\n`
+    ));
+  }
 
   parts.push(Buffer.from(
     `--${boundary}\r\n` +

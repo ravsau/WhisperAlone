@@ -130,6 +130,7 @@ src/
   main/
     main.ts           App lifecycle, tray menu, IPC, model selection
     transcriber.ts     Routes audio to OpenAI or MLX backend
+    transcript-cleaner.ts  Removes high-confidence decoder loops
     mlx-server.ts      Manages MLX Python venv, server lifecycle
     hotkey.ts          Double-tap Command key detection
     injector.ts        Text injection via JXA/CoreGraphics
@@ -143,6 +144,7 @@ src/
     audio-capture.*    Hidden recording window (MediaRecorder)
     overlay.*          Recording indicator overlay with waveform
 scripts/
+  evaluate-transcript-cleanup.cjs  Read-only history replay
   mlx-server.py        MLX Whisper HTTP server
   mlx-transcribe.py    Standalone MLX transcription script
 tests/
@@ -164,6 +166,20 @@ tests/
 
 ```bash
 npm test
+```
+
+### Repetition-loop protection
+
+WhisperAlone protects dictation at three boundaries:
+
+- The recorder sends one complete WebM plus local VAD speech timestamps, so trailing silence is excluded without slicing the media container.
+- MLX Whisper runs with `condition_on_previous_text=False`, which prevents one bad 30-second window from prompting the next one into the same loop.
+- A conservative text filter removes only high-confidence consecutive word or phrase loops. A versioned migration applies the same filter to existing history and rebuilds usage totals.
+
+Replay the filter against the current local history without changing it:
+
+```bash
+npm run eval:cleanup
 ```
 
 ## License

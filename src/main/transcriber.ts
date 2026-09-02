@@ -3,6 +3,11 @@ import { log } from './logger';
 import { getSettings } from './store';
 import { transcribeViaServer } from './mlx-server';
 
+export interface SpeechWindow {
+  startMs?: number;
+  endMs?: number;
+}
+
 // --- OpenAI backend ---
 
 function getOpenAIClient(): OpenAI {
@@ -40,7 +45,10 @@ export const DEFAULT_MLX_MODEL = MLX_MODELS[0].id;
 
 export type TranscriberBackend = 'openai' | 'mlx';
 
-export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
+export async function transcribeAudio(
+  audioBuffer: Buffer,
+  speechWindow?: SpeechWindow
+): Promise<string> {
   const settings = getSettings();
   const backend = settings.backend;
   const model = settings.mlxModel;
@@ -49,7 +57,7 @@ export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
 
   let text: string;
   if (backend === 'mlx') {
-    text = await transcribeViaServer(audioBuffer, model);
+    text = await transcribeViaServer(audioBuffer, model, speechWindow);
   } else {
     text = await transcribeWithOpenAI(audioBuffer);
   }

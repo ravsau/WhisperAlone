@@ -17,12 +17,12 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { HotkeyManager, type AppState } from './hotkey';
 import { transcribeAudio } from './transcriber';
+import { cleanTranscript } from './transcript-cleaner';
 import { injectText } from './injector';
 import { addHistoryEntry, getHistory, getSettings, getUsageStats, setSettings } from './store';
 import { log, logError } from './logger';
 import {
   startMLXServer, stopMLXServer, isMLXServerRunning, isFirstBoot, setServerCrashHandler,
-  startStreamingSession, sendStreamChunk, finishStreamingSession, isStreamingActive,
 } from './mlx-server';
 import {
   routeTranscription, exportTodayHistory, exportAllHistory, generateDailyDigest,
@@ -46,16 +46,20 @@ let overlayHideTimeout: NodeJS.Timeout | null = null;
 let overlayFollowInterval: NodeJS.Timeout | null = null;
 let hotkeyPermissionRetryInterval: NodeJS.Timeout | null = null;
 let hotkeyPermissionWarningShown = false;
-let fallbackAudioChunks: Buffer[] = [];
 let recordingState: AppState = 'IDLE';
 let isQuitting = false;
+let maxRecordingTimeout: NodeJS.Timeout | null = null;
 
 const FALLBACK_RECORDING_ACCELERATOR = 'CommandOrControl+Shift+Space';
+const MAX_RECORDING_MS = 5 * 60 * 1000;
 
 type AudioDataPayload = number[] | {
   bytes?: number[];
   durationMs?: number;
   audioSizeBytes?: number;
+  speechDetected?: boolean;
+  speechStartMs?: number;
+  speechEndMs?: number;
 };
 
 // Resolve asset path (works in both dev and packaged app)
@@ -734,25 +738,27 @@ async function beginRecording(source: string): Promise<void> {
   recordingState = 'RECORDING';
   log(`[WhisperAlone] Recording started (${source})`);
   playCue('start');
-  fallbackAudioChunks = [];
   setTrayRecording(true);
   rebuildTrayMenu();
   showOverlay();
 
-  // Start streaming session so audio chunks are forwarded to the server in real-time
-  const settings = getSettings();
-  if (settings.backend === 'mlx' && isMLXServerRunning()) {
-    const ok = await startStreamingSession(settings.mlxModel);
-    if (ok) {
-      log('[WhisperAlone] Streaming session started — chunks will be forwarded');
+  maxRecordingTimeout = setTimeout(() => {
+    if (recordingState === 'RECORDING') {
+      log('[WhisperAlone] Reached 5-minute recording safety limit');
+      finishRecording('5-minute safety limit');
     }
-  }
+  }, MAX_RECORDING_MS);
 
   audioWindow?.webContents.send('start-recording');
 }
 
 function finishRecording(source: string): void {
   if (recordingState !== 'RECORDING') return;
+
+  if (maxRecordingTimeout) {
+    clearTimeout(maxRecordingTimeout);
+    maxRecordingTimeout = null;
+  }
 
   recordingState = 'PROCESSING';
   log(`[WhisperAlone] Recording stopped, processing... (${source})`);
@@ -764,6 +770,10 @@ function finishRecording(source: string): void {
 }
 
 function resetRecordingState(): void {
+  if (maxRecordingTimeout) {
+    clearTimeout(maxRecordingTimeout);
+    maxRecordingTimeout = null;
+  }
   recordingState = 'IDLE';
   hotkey?.setIdle();
   rebuildTrayMenu();
@@ -795,6 +805,9 @@ function normalizeAudioDataPayload(payload: AudioDataPayload): {
   bytes: number[];
   durationMs?: number;
   audioSizeBytes?: number;
+  speechDetected?: boolean;
+  speechStartMs?: number;
+  speechEndMs?: number;
 } {
   if (Array.isArray(payload)) {
     return { bytes: payload };
@@ -809,45 +822,48 @@ function normalizeAudioDataPayload(payload: AudioDataPayload): {
     typeof payload?.audioSizeBytes === 'number' && Number.isFinite(payload.audioSizeBytes)
       ? payload.audioSizeBytes
       : undefined;
+  const speechDetected = typeof payload?.speechDetected === 'boolean'
+    ? payload.speechDetected
+    : undefined;
+  const speechStartMs = typeof payload?.speechStartMs === 'number' && Number.isFinite(payload.speechStartMs)
+    ? payload.speechStartMs
+    : undefined;
+  const speechEndMs = typeof payload?.speechEndMs === 'number' && Number.isFinite(payload.speechEndMs)
+    ? payload.speechEndMs
+    : undefined;
 
-  return { bytes, durationMs, audioSizeBytes };
+  return { bytes, durationMs, audioSizeBytes, speechDetected, speechStartMs, speechEndMs };
 }
 
 function setupIPC(): void {
-  // Forward audio chunks to the MLX streaming server in real-time
-  ipcMain.on('audio-chunk', (_event, data: number[]) => {
-    const chunk = Buffer.from(new Uint8Array(data));
-    if (isStreamingActive()) {
-      sendStreamChunk(chunk);
-    } else {
-      fallbackAudioChunks.push(chunk);
-    }
-  });
-
   ipcMain.on('audio-data', async (_event, payload: AudioDataPayload) => {
-    const { bytes, durationMs, audioSizeBytes } = normalizeAudioDataPayload(payload);
+    const {
+      bytes, durationMs, audioSizeBytes, speechDetected, speechStartMs, speechEndMs,
+    } = normalizeAudioDataPayload(payload);
     log(`[WhisperAlone] Received audio-data IPC, data length: ${bytes.length}`);
     try {
-      let buffer = Buffer.from(new Uint8Array(bytes));
-      if (!isStreamingActive() && buffer.length === 0 && fallbackAudioChunks.length > 0) {
-        buffer = Buffer.concat(fallbackAudioChunks);
-        log(`[WhisperAlone] Reconstructed batch audio from ${fallbackAudioChunks.length} chunks`);
+      const buffer = Buffer.from(new Uint8Array(bytes));
+      if (speechDetected === false) {
+        log('[WhisperAlone] VAD found no speech, skipping transcription');
+        resetRecordingState();
+        return;
       }
-      const settings = getSettings();
-      let text: string;
-
-      // If streaming session is active and we got empty data, finish via streaming
-      if (isStreamingActive() && buffer.length === 0) {
-        log('[WhisperAlone] Finishing streaming transcription...');
-        text = await finishStreamingSession();
-      } else if (buffer.length < 2000) {
+      if (buffer.length < 2000) {
         log(`[WhisperAlone] Recording too short (${buffer.length} bytes), skipping`);
         resetRecordingState();
         return;
-      } else {
-        // Fallback: batch transcription
-        log(`[WhisperAlone] Transcribing ${buffer.length} bytes (batch)...`);
-        text = await transcribeAudio(buffer);
+      }
+
+      log(`[WhisperAlone] Transcribing ${buffer.length} bytes (batch)...`);
+      const rawText = await transcribeAudio(buffer, { startMs: speechStartMs, endMs: speechEndMs });
+      const cleanup = cleanTranscript(rawText);
+      const text = cleanup.text;
+
+      if (cleanup.changed) {
+        log(
+          `[WhisperAlone] Cleanup removed ${cleanup.removedTokens} repeated tokens ` +
+          `across ${cleanup.removedLoops} loop(s)${cleanup.rejected ? '; rejected transcript' : ''}`
+        );
       }
 
       if (text && text.length > 0) {
@@ -878,7 +894,6 @@ function setupIPC(): void {
         body: `Transcription failed. ${detail}`,
       }).show();
     } finally {
-      fallbackAudioChunks = [];
       hideOverlayNow();
       resetRecordingState();
     }

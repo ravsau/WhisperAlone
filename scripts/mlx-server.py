@@ -116,13 +116,6 @@ def get_llm(model_name=None):
         raise
 
 
-# --- Streaming session store ---
-# Clients POST chunks to /stream/chunk and then POST /stream/finish to transcribe.
-_stream_lock = threading.Lock()
-_stream_chunks: list[bytes] = []
-_stream_model: str = "mlx-community/whisper-small"
-
-
 class TranscribeHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"[MLX-Server] {format % args}", file=sys.stderr, flush=True)
@@ -139,15 +132,6 @@ class TranscribeHandler(BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown).start()
             return
 
-        if self.path == "/stream/start":
-            return self._handle_stream_start()
-
-        if self.path == "/stream/chunk":
-            return self._handle_stream_chunk()
-
-        if self.path == "/stream/finish":
-            return self._handle_stream_finish()
-
         if self.path == "/transcribe":
             return self._handle_transcribe()
 
@@ -155,66 +139,6 @@ class TranscribeHandler(BaseHTTPRequestHandler):
             return self._handle_generate()
 
         self._json_response(404, {"error": "not found"})
-
-    # --- Streaming endpoints ---
-
-    def _handle_stream_start(self):
-        """Begin a new streaming session, clearing any previous chunks."""
-        global _stream_model
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length) if content_length > 0 else b""
-        try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            data = {}
-        with _stream_lock:
-            _stream_chunks.clear()
-            _stream_model = data.get("model", _stream_model)
-        self._json_response(200, {"status": "ready"})
-
-    def _handle_stream_chunk(self):
-        """Append a raw audio chunk to the streaming buffer."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        chunk = self.rfile.read(content_length)
-        with _stream_lock:
-            _stream_chunks.append(chunk)
-        self._json_response(200, {"chunks": len(_stream_chunks)})
-
-    def _handle_stream_finish(self):
-        """Concatenate all streamed chunks and transcribe."""
-        with _stream_lock:
-            if not _stream_chunks:
-                self._json_response(400, {"error": "no audio chunks received"})
-                return
-            audio_data = b"".join(_stream_chunks)
-            model_name = _stream_model
-            _stream_chunks.clear()
-
-        if not audio_data:
-            self._json_response(400, {"error": "empty audio"})
-            return
-
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
-            tmp.write(audio_data)
-            tmp_path = tmp.name
-
-        try:
-            mlx_whisper = get_transcriber(model_name)
-            result = mlx_whisper.transcribe(
-                tmp_path,
-                path_or_hf_repo=model_name,
-            )
-            text = result.get("text", "").strip()
-            self._json_response(200, {"text": text})
-        except ImportError as e:
-            self._json_response(500, {"error": str(e)})
-        except Exception as e:
-            self._json_response(500, {"error": str(e)})
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
 
     # --- LLM generate endpoint ---
 
@@ -257,7 +181,7 @@ class TranscribeHandler(BaseHTTPRequestHandler):
             print(f"[MLX-Server] Generate error: {e}", file=sys.stderr, flush=True)
             self._json_response(500, {"error": str(e)})
 
-    # --- Legacy batch endpoint (kept for fallback) ---
+    # --- Transcription endpoint ---
 
     def _handle_transcribe(self):
         try:
@@ -280,9 +204,13 @@ class TranscribeHandler(BaseHTTPRequestHandler):
                     self._json_response(400, {"error": "no file field"})
                     return
                 audio_data = file_part["data"]
+                clip_start = parts.get("clip_start", {}).get("data")
+                clip_end = parts.get("clip_end", {}).get("data")
             else:
                 audio_data = body
                 model_name = self.headers.get("X-Model", "mlx-community/whisper-small")
+                clip_start = None
+                clip_end = None
 
             if not audio_data:
                 self._json_response(400, {"error": "no audio data"})
@@ -294,9 +222,20 @@ class TranscribeHandler(BaseHTTPRequestHandler):
 
             try:
                 mlx_whisper = get_transcriber(model_name)
+                transcribe_options = {
+                    "path_or_hf_repo": model_name,
+                    # The MLX Whisper docs explicitly recommend disabling the
+                    # previous-window prompt when repetition loops occur.
+                    "condition_on_previous_text": False,
+                }
+                if clip_start is not None and clip_end is not None:
+                    start = max(0.0, float(clip_start))
+                    end = max(start, float(clip_end))
+                    if end > start:
+                        transcribe_options["clip_timestamps"] = f"{start},{end}"
                 result = mlx_whisper.transcribe(
                     tmp_path,
-                    path_or_hf_repo=model_name,
+                    **transcribe_options,
                 )
                 text = result.get("text", "").strip()
                 self._json_response(200, {"text": text})

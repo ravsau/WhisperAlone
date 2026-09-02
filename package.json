@@ -13,7 +13,8 @@
     "dist:dir": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --publish never",
     "sign:local": "bash ./scripts/sign-local-app.sh",
     "install:local": "npm run dist:dir && npm run sign:local && bash ./scripts/install-local-app.sh",
-    "test": "vitest run"
+    "test": "vitest run",
+    "eval:cleanup": "npm run build && node ./scripts/evaluate-transcript-cleanup.cjs"
   },
   "author": "",
   "license": "MIT",

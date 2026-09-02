@@ -28,6 +28,7 @@ def main():
         result = mlx_whisper.transcribe(
             audio_file,
             path_or_hf_repo=model_name,
+            condition_on_previous_text=False,
         )
         text = result.get("text", "").strip()
         # Output as JSON for reliable parsing

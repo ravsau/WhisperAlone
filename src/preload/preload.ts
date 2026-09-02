@@ -4,6 +4,9 @@ type AudioDataPayload = number[] | {
   bytes: number[];
   durationMs?: number;
   audioSizeBytes?: number;
+  speechDetected?: boolean;
+  speechStartMs?: number;
+  speechEndMs?: number;
 };
 
 contextBridge.exposeInMainWorld('api', {
@@ -16,9 +19,6 @@ contextBridge.exposeInMainWorld('api', {
   },
   sendAudioData: (payload: AudioDataPayload) => {
     ipcRenderer.send('audio-data', payload);
-  },
-  sendAudioChunk: (data: number[]) => {
-    ipcRenderer.send('audio-chunk', data);
   },
   sendRecordingError: (message: string) => {
     ipcRenderer.send('recording-error', message);

@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { log } from './logger';
 import type { TranscriberBackend } from './transcriber';
+import { cleanTranscript } from './transcript-cleaner';
 
 export interface TranscriptionEntry {
   id: string;
@@ -45,6 +46,7 @@ interface StoreSchema {
   history: TranscriptionEntry[];
   historyRecoveredFromLogs: boolean;
   historyRecoveryVersion: number;
+  transcriptCleanupVersion: number;
   settings: AppSettings;
   usageStats: UsageStats;
 }
@@ -58,6 +60,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 const MAX_DAILY_STATS_DAYS = 730;
 const USAGE_STATS_SCHEMA_VERSION = 4;
 const HISTORY_RECOVERY_VERSION = 2;
+const TRANSCRIPT_CLEANUP_VERSION = 1;
 const LOG_DIR = path.join(os.homedir(), 'Library/Application Support/whisper-alone');
 const LOG_FILES = [
   path.join(LOG_DIR, 'WhisperAlone.log.old'),
@@ -87,6 +90,7 @@ const store = new Conf<StoreSchema>({
     history: [],
     historyRecoveredFromLogs: false,
     historyRecoveryVersion: 0,
+    transcriptCleanupVersion: 0,
     settings: DEFAULT_SETTINGS,
     usageStats: createDefaultUsageStats(),
   },
@@ -236,15 +240,15 @@ function createRecoveredEntry(
   index: number,
   source: string
 ): TranscriptionEntry | null {
-  const trimmed = text.trim();
-  if (!Number.isFinite(timestamp) || trimmed.length === 0) return null;
+  const cleaned = cleanTranscript(text);
+  if (!Number.isFinite(timestamp) || cleaned.rejected) return null;
 
   return {
     id: `${source}-${timestamp}-${index}`,
-    text: trimmed,
+    text: cleaned.text,
     timestamp,
     duration: 0,
-    wordCount: countWords(trimmed),
+    wordCount: countWords(cleaned.text),
     durationSource: 'recovered',
   };
 }
@@ -453,6 +457,40 @@ function recoverHistoryFromSourcesIfNeeded(): TranscriptionEntry[] {
   return merged;
 }
 
+function cleanStoredHistoryIfNeeded(history: TranscriptionEntry[]): TranscriptionEntry[] {
+  if (store.get('transcriptCleanupVersion') >= TRANSCRIPT_CLEANUP_VERSION) {
+    return history;
+  }
+
+  let changedEntries = 0;
+  let removedEntries = 0;
+  const cleanedHistory: TranscriptionEntry[] = [];
+
+  for (const entry of history) {
+    const cleanup = cleanTranscript(entry.text);
+    if (cleanup.rejected) {
+      removedEntries += 1;
+      continue;
+    }
+
+    if (cleanup.changed) changedEntries += 1;
+    cleanedHistory.push({
+      ...entry,
+      text: cleanup.text,
+      wordCount: countWords(cleanup.text),
+    });
+  }
+
+  store.set('history', cleanedHistory);
+  store.set('usageStats', buildUsageStatsFromHistory(cleanedHistory));
+  store.set('transcriptCleanupVersion', TRANSCRIPT_CLEANUP_VERSION);
+  log(
+    `[Store] Transcript cleanup migrated ${changedEntries} entries and removed ` +
+    `${removedEntries} loop-only entries`
+  );
+  return cleanedHistory;
+}
+
 function recordingDuration(
   audioSizeBytes: number,
   recordingDurationMs?: number
@@ -501,13 +539,14 @@ export function addHistoryEntry(
 }
 
 export function getHistory(): TranscriptionEntry[] {
-  return recoverHistoryFromSourcesIfNeeded();
+  return cleanStoredHistoryIfNeeded(recoverHistoryFromSourcesIfNeeded());
 }
 
 export function clearHistory(): void {
   store.set('history', []);
   store.set('historyRecoveredFromLogs', true);
   store.set('historyRecoveryVersion', HISTORY_RECOVERY_VERSION);
+  store.set('transcriptCleanupVersion', TRANSCRIPT_CLEANUP_VERSION);
 }
 
 // --- Usage Stats ---
